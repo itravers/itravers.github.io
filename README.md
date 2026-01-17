@@ -10,8 +10,7 @@ Creatures begin completely clueless. Over generations, they evolve behaviors tha
 
 ## Live Demo
 
-👉 **[Live Demo Link]**  
-(Open in your browser — no installation required)
+just download one of the nn files, and run it.
 
 ---
 
