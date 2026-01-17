@@ -1,0 +1,1249 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Neuro Evolution Sandbox</title>
+<style>
+html, body { margin:0; padding:0; background:#111; overflow:hidden; }
+canvas { display:block; }
+#hud {
+  position: fixed;
+  left: 10px;
+  top: 10px;
+  color: #ddd;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  background: rgba(0,0,0,0.45);
+  padding: 10px;
+  border-radius: 10px;
+}
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<canvas id="c"></canvas>
+
+<script>
+
+
+(() => {
+
+const fileInput = document.createElement("input");
+fileInput.type = "file";
+fileInput.multiple = true;
+fileInput.accept = ".json";
+fileInput.style.display = "none";
+document.body.appendChild(fileInput);
+
+/* =========================
+   CONFIG
+========================= */
+const cfg = {
+  W: innerWidth,
+  H: innerHeight,
+
+  POP_INIT: 30,
+  POP_MIN: 20,
+  POP_MAX: 110,
+
+  FOOD_CLUSTERS: 24,
+  FOOD_PER_CLUSTER: 2,
+  FOOD_RADIUS: 150,
+  FOOD_ENERGY: 40,
+
+  DT: 1/60,
+
+  SPEED_LIMIT: 100,
+  ACCEL: 40,
+  TURN_LIMIT: 4.5,
+  TURN_ACCEL: 6.5,
+  FRICTION: 0.985,
+
+  BOOST_MULT: 3.0,
+  BOOST_ACCEL_MULT: 4.2,
+  BOOST_COST: 3.5,
+  BOOST_COOLDOWN: 10,
+  BOOST_SPEED_MULT: 3,
+  BOOST_DURATION: 0.75,
+
+  BRAKE_FORCE: 0.85,
+  BRAKE_COST: 4,
+  BRAKE_COOLDOWN: 1.5,
+
+  ENERGY_INIT: 70,
+  ENERGY_MAX: 250,
+  ENERGY_DECAY: 2.0,
+  ENERGY_MOVE_COST: 0.0072,
+  ENERGY_TURN_COST: 0.1,
+
+  REPRO_THRESHOLD: 50,
+  REPRO_COST: 10,
+  REPRO_COOLDOWN: 10,
+  REPRO_MIN_AGE: 21,
+  
+  // lineage visualization
+LINEAGE_DRAW_TIME: 3,     // seconds to show parent-child links after birth
+LINEAGE_ALPHA: 0.25 ,      // base opacity for lineage lines
+  
+	  // reproductive capacity scaling
+	BASE_CHILDREN: 5,          // minimum offspring any viable genome can have
+	CHILDREN_PER_AGE: 20,      // seconds of survival per additional child slot
+	MAX_CHILDREN_CAP: 80,      // absolute safety cap to prevent explosions
+
+  MUT_RATE: 0.12,
+  MUT_SCALE: 0.4,
+  WEIGHT_CLAMP: 3.0,
+
+  N_IN: 36 + 2, // 36 inputs, and N_MEM (3) memory neurons, must match N_MEM
+  N_H: 24,
+  N_OUT: 4 + 2 * 2, // controls + (candidate, gate) per memory last * x must be same as N_MEM
+  N_MEM: 2, // number of gated memory units (internal state)
+
+  SENSE_RADIUS: 200,
+  EAT_RADIUS: 8,
+  AGENT_RADIUS: 5
+};
+
+/* =========================
+   CANVAS
+========================= */
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const hud = document.getElementById("hud");
+
+
+
+function resize(){
+  canvas.width = cfg.W = innerWidth;
+  canvas.height = cfg.H = innerHeight;
+}
+
+function saveJSON(data, filename){
+  const blob = new Blob(
+    [JSON.stringify(data, null, 2)],
+    { type: "application/json" }
+  );
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+
+  URL.revokeObjectURL(url);
+}
+
+function loadGenome(data){
+  if (!data.genome) {
+    alert("Invalid genome file");
+    return;
+  }
+
+  const expected = new Brain().count();
+  if (data.genome.length !== expected) {
+    alert(
+      `Genome length mismatch.\n` +
+      `Expected ${expected}, got ${data.genome.length}`
+    );
+    return;
+  }
+
+  const c = new Creature(data.genome);
+  c.x = Math.random() * cfg.W;
+  c.y = Math.random() * cfg.H;
+  c.isLoaded = true;
+
+  creatures.push(c);
+}
+
+
+
+function populationBrainDiversity(creatures) {
+  // returns a number in [0,1]
+  // ~0 => brains behave almost identically
+  // ~1 => brains behave very differently
+
+  if (creatures.length < 2) return 0;
+
+  // generate a small set of shared probe inputs
+  // these represent "abstract situations"
+  const probes = [];
+  const PROBE_COUNT = 8;
+
+  for (let i = 0; i < PROBE_COUNT; i++) {
+    const v = new Array(cfg.N_IN);
+    for (let j = 0; j < cfg.N_IN; j++) {
+      v[j] = rand(-1, 1);
+    }
+    probes.push(v);
+  }
+
+  let acc = 0;
+  let comparisons = 0;
+
+  // compare a handful of random pairs
+  const PAIRS = Math.min(20, creatures.length * 2);
+
+  for (let k = 0; k < PAIRS; k++) {
+    const a = creatures[(Math.random() * creatures.length) | 0];
+    const b = creatures[(Math.random() * creatures.length) | 0];
+    if (a === b) continue;
+
+    let d = 0;
+
+    for (const p of probes) {
+      const oa = a.brain.forward(p);
+      const ob = b.brain.forward(p);
+
+      // L1 distance over outputs
+      d +=
+        Math.abs(oa[0] - ob[0]) +          // thrust
+        Math.abs(oa[1] - ob[1]) +          // turn (range 2)
+        Math.abs(oa[2] - ob[2]) +          // boost
+        Math.abs(oa[3] - ob[3]);           // brake
+    }
+
+    // normalize by max possible distance
+    d /= probes.length * 5;
+
+    acc += d;
+    comparisons++;
+  }
+
+  return comparisons ? acc / comparisons : 0;
+}
+
+
+addEventListener("resize", resize);
+resize();
+
+/* =========================
+   GLOBAL FITNESS TRACKING
+========================= */
+let bestFitnessEver = 0;
+let nextBirthId = 1;
+let currentGeneration = 1;
+let oldestAgeEver = 0;
+let mostEatenEver = 0;
+let lastSavedOldest = 0;
+let minGeneration = 0;
+let maxGeneration = 0;
+let lastImmigrantTime = 0;
+let lastDiversityCheck = 0;
+let cachedDiversity = 1;
+const DIVERSITY_FLOOR = 0.20;
+const eliteArchive = [];
+
+// toggles drawing of sensory lines for the current champion (rank 1)
+let showChampionSenses = false;
+
+/* =========================
+   UTIL
+========================= */
+const rand=(a=0,b=1)=>a+Math.random()*(b-a);
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const len=(x,y)=>Math.hypot(x,y);
+const wrap=(x,m)=>x<0?x+m:(x>=m?x-m:x);
+
+function genomeToColor(genome){
+  let x=0, y=0, z=0;
+
+  for(let i=0;i<genome.length;i++){
+    const w = genome[i];
+
+    // 3 fixed projection "directions" (deterministic)
+    x += w * Math.sin(i * 12.9898);
+    y += w * Math.sin(i * 78.233);
+    z += w * Math.sin(i * 39.425);
+  }
+
+  // normalize to keep color stable as magnitudes drift
+  const m = Math.hypot(x,y,z) || 1;
+  x /= m; y /= m; z /= m;
+
+  // map to HSL
+  const hue = (Math.atan2(y,x) / Math.PI * 180 + 360) % 360;
+  const sat = 70;
+  const light = 50 + 20 * z; // z in [-1,1] -> light in [30,70]
+
+  return `hsl(${hue},${sat}%,${light}%)`;
+}
+
+function genomeDistance(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i] - b[i];
+    s += d * d;
+  }
+  return Math.sqrt(s / a.length);
+}
+
+/* =========================
+   BRAIN
+========================= */
+const tanh=Math.tanh;
+const sigmoid=x=>1/(1+Math.exp(-x));
+
+class Brain{
+  constructor(w=null){
+    this.w=w?w.slice():Array.from({length:this.count()},()=>rand(-1,1));
+  }
+  count(){
+    return cfg.N_H*(cfg.N_IN+1)+cfg.N_OUT*(cfg.N_H+1);
+  }
+  forward(inp){
+    let i=0,h=[];
+    for(let n=0;n<cfg.N_H;n++){
+      let s=0;
+      for(let k=0;k<cfg.N_IN;k++) s+=this.w[i++]*inp[k];
+      s+=this.w[i++]; h[n]=tanh(s);
+    }
+    const out=[];
+    for(let o=0;o<cfg.N_OUT;o++){
+      let s=0;
+      for(let k=0;k<cfg.N_H;k++) s+=this.w[i++]*h[k];
+      s+=this.w[i++]; out[o]=s;
+    }
+	
+	/*
+    return [
+      sigmoid(out[0]),
+      tanh(out[1]),
+      sigmoid(out[2]),
+      sigmoid(out[3])
+    ];
+	*/
+	
+	return out.map((v, i) => {
+	  if (i === 1) return Math.tanh(v);       // turn
+	  if (i === 0 || i === 2 || i === 3) return sigmoid(v);
+	  return v; // raw memory signals
+	});
+  }
+  static crossover(a,b){
+    const p=Math.floor(rand(1,a.length-1));
+    return a.map((v,i)=>i<p?v:b[i]);
+  }
+  
+	static mutate(w, rateMul=1, scaleMul=1){
+	  const rate = clamp(cfg.MUT_RATE * rateMul, 0, 1);
+	  const scale = cfg.MUT_SCALE * scaleMul;
+
+	  return w.map(v=>{
+		if(Math.random() < rate){
+		  v += rand(-1,1) * scale;
+		  v = clamp(v, -cfg.WEIGHT_CLAMP, cfg.WEIGHT_CLAMP);
+		}
+		return v;
+	  });
+	}
+}
+
+/* =========================
+   FOOD
+========================= */
+const clusters=[],foods=[];
+function initFood(){
+  clusters.length=foods.length=0;
+  for(let i=0;i<cfg.FOOD_CLUSTERS;i++){
+    clusters.push({x:rand(0,cfg.W),y:rand(0,cfg.H)});
+  }
+  clusters.forEach(c=>{
+    for(let i=0;i<cfg.FOOD_PER_CLUSTER;i++){
+      foods.push({c,x:0,y:0});
+    }
+  });
+  respawnFood();
+}
+function respawnFood(){
+  foods.forEach(f=>{
+    const a=rand(0,Math.PI*2),r=rand(0,cfg.FOOD_RADIUS);
+    f.x=wrap(f.c.x+Math.cos(a)*r,cfg.W);
+    f.y=wrap(f.c.y+Math.sin(a)*r,cfg.H);
+  });
+}
+
+function getCreatureAt(x, y) {
+  let best = null;
+  let bestD2 = cfg.AGENT_RADIUS * cfg.AGENT_RADIUS * 4;
+
+  for (const c of creatures) {
+    const dx = c.x - x;
+    const dy = c.y - y;
+    const d2 = dx * dx + dy * dy;
+
+    if (d2 < bestD2) {
+      bestD2 = d2;
+      best = c;
+    }
+  }
+
+  return best;
+}
+
+/* =========================
+   NEAREST HELPERS (NEW)
+========================= */
+function nearestFoods(c,k=3){
+  return foods
+    .map(f=>({f,d:(f.x-c.x)**2+(f.y-c.y)**2}))
+    .sort((a,b)=>a.d-b.d)
+    .slice(0,k)
+    .map(o=>o.f);
+}
+function nearestCreatures(c,k=3){
+  return creatures
+    .filter(o=>o!==c)
+    .map(o=>({o,d:(o.x-c.x)**2+(o.y-c.y)**2}))
+    .sort((a,b)=>a.d-b.d)
+    .slice(0,k)
+    .map(o=>o.o);
+}
+
+/* =========================
+   CREATURE
+========================= */
+class Creature{
+  constructor(w=null,parents=null){
+    this.x=rand(0,cfg.W); this.y=rand(0,cfg.H);
+    this.birthId=nextBirthId++;
+    this.generation=parents
+      ? Math.max(parents[0].generation,parents[1].generation)+1
+      : 1;
+    this.vx=0; this.vy=0;
+    this.angle=rand(0,Math.PI*2);
+    this.omega=0;
+    this.energy=cfg.ENERGY_INIT;
+    this.score=0;
+	this.isLoaded = false;
+	this.isBurst = false;
+	this.isImmigrant = false;
+	this.maxChildren = cfg.BASE_CHILDREN;
+    this.cooldown=0;
+    this.boostCD=0;
+    this.brakeCD=0;
+    this.children=0;
+	// store parent references for lineage visualization
+	this.parents = parents ? parents.map(p => p.birthId) : null;
+
+	// record birth time so we can fade lineage lines
+	this.birthTime = performance.now() * 0.001; // seconds
+    this.prevFoodDist=Infinity;
+    this.timeSinceEat=0;
+    this.foodEaten=0;
+    this.boostTime=0;
+	this.age = 0;
+    this.brain=new Brain(w);
+    this.genome=this.brain.w;
+	
+	// Gated recurrent memory (persistent internal state)
+	this.mem = Array(cfg.N_MEM).fill(0);
+    this.color = genomeToColor(this.genome);
+  }
+
+  sense(foodList, creatureList){
+    const inputs=[];
+    const ca=Math.cos(this.angle), sa=Math.sin(this.angle);
+
+    // --- ORIGINAL 12 INPUTS (unchanged)
+    let fx=0, fy=0, d=0;
+    if(foodList[0]){
+      fx=foodList[0].x-this.x;
+      fy=foodList[0].y-this.y;
+      d=Math.min(len(fx,fy),cfg.SENSE_RADIUS);
+    }
+    const nx=d?fx/d:0, ny=d?fy/d:0;
+    inputs.push(
+      ca*nx+sa*ny,
+      -sa*nx+ca*ny,
+      1-d/cfg.SENSE_RADIUS,
+      this.energy/cfg.ENERGY_MAX,
+      len(this.vx,this.vy)/cfg.SPEED_LIMIT,
+      this.omega/cfg.TURN_LIMIT,
+      Math.cos(this.angle),
+      Math.sin(this.angle),
+      this.boostCD>0?1:0,
+      this.brakeCD>0?1:0,
+      1,1
+    );
+
+    // --- FOOD (3 × 3)
+    for(let i=0;i<3;i++){
+      const f=foodList[i];
+      if(f){
+        const dx=f.x-this.x, dy=f.y-this.y;
+        const dist=Math.min(len(dx,dy),cfg.SENSE_RADIUS);
+        const nx=dist?dx/dist:0, ny=dist?dy/dist:0;
+        inputs.push(ca*nx+sa*ny,-sa*nx+ca*ny,1-dist/cfg.SENSE_RADIUS);
+      }else inputs.push(0,0,0);
+    }
+
+    // --- CREATURES (3 × 5)
+    for(let i=0;i<3;i++){
+      const o=creatureList[i];
+      if(o){
+        const dx=o.x-this.x, dy=o.y-this.y;
+        const dist=Math.min(len(dx,dy),cfg.SENSE_RADIUS);
+        const nx=dist?dx/dist:0, ny=dist?dy/dist:0;
+        const rvx=o.vx-this.vx, rvy=o.vy-this.vy;
+        inputs.push(
+          ca*nx+sa*ny,
+          -sa*nx+ca*ny,
+          1-dist/cfg.SENSE_RADIUS,
+          ca*rvx+sa*rvy,
+          -sa*rvx+ca*rvy
+        );
+      }else inputs.push(0,0,0,0,0);
+    }
+	
+	// Append internal memory state to inputs
+	for (let i = 0; i < this.mem.length; i++) {
+	  inputs.push(this.mem[i]);
+	}
+
+    return inputs;
+  }
+
+  step(foodList, creatureList){
+    const out = this.brain.forward(
+	  this.sense(foodList, creatureList)
+	);
+
+	// --- Primary control outputs (unchanged meaning)
+	const thrust = out[0];
+	const turn   = out[1];
+	const boost  = out[2];
+	const brake  = out[3];
+
+	// --- Gated memory update
+	let idx = 4;
+	for (let i = 0; i < this.mem.length; i++) {
+	  const candidate = Math.tanh(out[idx++]);   // proposed new memory value
+	  const gate = 1 / (1 + Math.exp(-out[idx++])); // update strength [0,1]
+
+	  // gated recurrence:
+	  // gate ≈ 0 → keep old memory
+	  // gate ≈ 1 → overwrite memory
+	  this.mem[i] = (1 - gate) * this.mem[i] + gate * candidate;
+	}
+
+    // --- EVERYTHING BELOW IS UNCHANGED ---
+    this.omega+=turn*cfg.TURN_ACCEL*cfg.DT;
+    this.omega=clamp(this.omega,-cfg.TURN_LIMIT,cfg.TURN_LIMIT);
+    this.angle+=this.omega*cfg.DT;
+
+    // Calculate boost intensity (0-1) based on how far boost signal exceeds 0.6
+    // 0.6 = gentle nudge (no boost), 1.0 = full boost
+    this.boostIntensity = boost > 0.6 ? 
+      Math.min(1, (boost - 0.6) / 0.4) : 0;
+
+    // Trigger boost activation if intensity > 0 and not on cooldown
+    if(this.boostIntensity > 0 && this.boostCD <= 0 && this.energy > cfg.BOOST_COST){
+      this.boostTime = cfg.BOOST_DURATION;
+      this.energy -= cfg.BOOST_COST;
+      this.boostCD = cfg.BOOST_COOLDOWN;
+    }
+
+    // Apply scaled boost acceleration based on intensity
+    let accel = cfg.ACCEL;
+    if(this.boostTime > 0) {
+      accel *= 1 + (cfg.BOOST_ACCEL_MULT - 1) * this.boostIntensity;
+    }
+
+    this.vx+=Math.cos(this.angle)*thrust*accel*cfg.DT;
+    this.vy+=Math.sin(this.angle)*thrust*accel*cfg.DT;
+
+    if(brake>0.6&&this.brakeCD<=0&&this.energy>cfg.BRAKE_COST){
+      this.vx*=cfg.BRAKE_FORCE;
+      this.vy*=cfg.BRAKE_FORCE;
+      this.energy-=cfg.BRAKE_COST;
+      this.brakeCD=cfg.BRAKE_COOLDOWN;
+    }
+
+    // Apply scaled boost speed multiplier based on intensity
+    const boostFactor = this.boostTime > 0 ? 
+      1 + (cfg.BOOST_SPEED_MULT - 1) * this.boostIntensity : 1;
+    const maxSpeed = cfg.SPEED_LIMIT * boostFactor;
+    const sp=len(this.vx,this.vy);
+    if(sp>maxSpeed){
+      const s=maxSpeed/sp;
+      this.vx*=s; this.vy*=s;
+    }
+
+    this.x=wrap(this.x+this.vx*cfg.DT,cfg.W);
+    this.y=wrap(this.y+this.vy*cfg.DT,cfg.H);
+
+    const friction=this.boostTime>0?Math.pow(cfg.FRICTION,0.6):cfg.FRICTION;
+    this.vx*=friction; this.vy*=friction;
+    this.omega*=0.96;
+
+    if (Number.isFinite(cfg.ENERGY_DECAY) && Number.isFinite(cfg.DT)) {
+	  this.energy -= cfg.ENERGY_DECAY * cfg.DT;
+	}
+	
+	
+    if (Number.isFinite(sp)) {
+	  this.energy -= cfg.ENERGY_MOVE_COST * sp * cfg.DT;
+	}
+	
+	/*if (Number.isFinite(this.omega)) {
+	  this.energy -= cfg.ENERGY_TURN_COST * this.omega * this.omega * cfg.DT;
+	}*/
+
+    this.energy=clamp(this.energy,0,cfg.ENERGY_MAX);
+
+    this.boostCD=Math.max(0,this.boostCD-cfg.DT);
+    this.brakeCD=Math.max(0,this.brakeCD-cfg.DT);
+    this.cooldown=Math.max(0,this.cooldown-cfg.DT);
+    this.boostTime=Math.max(0,this.boostTime-cfg.DT);
+
+    this.timeSinceEat+=cfg.DT;
+	this.age += cfg.DT;
+	
+	// increase reproductive capacity as a function of survival time
+	// longer-lived genomes earn more opportunities to reproduce
+	this.maxChildren = clamp(
+	  cfg.BASE_CHILDREN + Math.floor(this.age / cfg.CHILDREN_PER_AGE),
+	  cfg.BASE_CHILDREN,
+	  cfg.MAX_CHILDREN_CAP
+	);
+
+    const hunger=Math.min(this.timeSinceEat,5);
+    this.score-=hunger*0.0075*cfg.DT;
+	
+	this.score += 0.004 * cfg.DT;
+	
+	// --------------------------------------------------
+	// FOOD PURSUIT FITNESS SHAPING
+	//
+	// Reward decisive velocity toward ANY nearby food.
+	// The creature is free to choose which food to pursue.
+	// We reward the BEST-aligned pursuit, not the closest food.
+	//
+	// This encourages:
+	// - abandoning contested food
+	// - racing behavior
+	// - early commitment
+	// - strategic switching
+	// --------------------------------------------------
+	if (foodList.length > 0) {
+	  let bestAlignment = -1;
+
+	  for (let i = 0; i < foodList.length; i++) {
+		const f = foodList[i];
+		if (!f) continue;
+
+		const dx = f.x - this.x;
+		const dy = f.y - this.y;
+		const dist = Math.min(len(dx, dy), cfg.SENSE_RADIUS);
+		if (dist <= 0) continue;
+
+		const nx = dx / dist;
+		const ny = dy / dist;
+
+		// velocity projected onto direction to this food
+		const vToward =
+		  (this.vx * nx + this.vy * ny) / cfg.SPEED_LIMIT;
+
+		if (vToward > bestAlignment) {
+		  bestAlignment = vToward;
+		}
+	  }
+
+	  // Reward committing toward *some* food
+	  if (bestAlignment > 0) {
+		this.score += bestAlignment * 0.40 * cfg.DT;
+	  }
+	  // Penalize drifting or fleeing from all visible food
+	  else {
+		this.score += bestAlignment * 0.075 * cfg.DT;
+	  }
+	}
+	
+	if (!Number.isFinite(this.energy)) {
+	  console.error("Energy blew up", {
+		energy: this.energy,
+		vx: this.vx,
+		vy: this.vy,
+		omega: this.omega,
+		age: this.age,
+		prevFoodDist: this.prevFoodDist
+	  });
+	}
+
+
+
+	// If they have a food item in their first food sensor
+	
+	/* too greedy of a reward signal
+    if(foodList[0]){
+	
+	  // Calculate if we're closing distance to that food
+      const d=len(foodList[0].x-this.x,foodList[0].y-this.y);
+      const delta=this.prevFoodDist-d;
+      this.score+=clamp(delta,-1,1)*0.2; // changed from 0.035 to 0.2, hopefully, lundging towards food will be better rewarded
+      this.prevFoodDist=d;
+    }
+	*/
+  }
+
+  tryEat(){
+    for(const f of foods){
+      if(len(f.x-this.x,f.y-this.y)<cfg.EAT_RADIUS){
+        this.energy=clamp(this.energy+cfg.FOOD_ENERGY,0,cfg.ENERGY_MAX);
+        this.score+=8+(1-this.energy/cfg.ENERGY_MAX)*5;
+        this.timeSinceEat=0;
+        this.foodEaten++;
+        this.prevFoodDist=Infinity;
+        const a=rand(0,Math.PI*2),r=rand(0,cfg.FOOD_RADIUS);
+        f.x=wrap(f.c.x+Math.cos(a)*r,cfg.W);
+        f.y=wrap(f.c.y+Math.sin(a)*r,cfg.H);
+      }
+    }
+  }
+
+canReproduce() {
+  // must be old enough
+  if (this.age < cfg.REPRO_MIN_AGE) return false;
+
+  // must not be on cooldown
+  if (this.cooldown > 0) return false;
+
+  // enforce lifetime-scaled reproductive capacity
+	if (this.children >= this.maxChildren) return false;
+
+  // probabilistic reproduction pressure
+  const energyFactor = this.energy / cfg.ENERGY_MAX;
+  const foodFactor = 1 + Math.min(this.foodEaten, 3) * 0.5;
+
+  const reproChance = clamp(energyFactor * foodFactor, 0, 1);
+
+  return Math.random() < reproChance;
+}
+
+  draw(rank,absNorm){
+    ctx.save();
+    ctx.translate(this.x,this.y);
+    ctx.rotate(this.angle);
+    ctx.beginPath();
+    ctx.moveTo(8,0);
+    ctx.lineTo(-6,4);
+    ctx.lineTo(-6,-4);
+    ctx.closePath();
+    ctx.fillStyle = this.color;
+	ctx.fill();
+
+	// top performers (unchanged)
+	if(rank<=3){
+	  ctx.lineWidth = rank===1 ? 3 : 2;
+	  ctx.strokeStyle = rank===1 ? "#ffd700" : rank===2 ? "#ccc" : "#cd7f32";
+	  ctx.stroke();
+	}
+
+	// burst mutation marker (NEW)
+	if(this.isBurst){
+	  ctx.lineWidth = 2;
+	  ctx.strokeStyle = "#ff4fd8"; // hot pink
+	  ctx.stroke();
+	}
+	
+	// loaded genome marker
+	if (this.isLoaded) {
+	  ctx.setLineDash([4, 3]);
+	  ctx.lineWidth = 2;
+	  ctx.strokeStyle = "#00ffff"; // cyan
+	  ctx.stroke();
+	  ctx.setLineDash([]);
+	}
+	
+	// immigrant marker
+	if (this.isImmigrant) {
+	  ctx.lineWidth = 2;
+	  ctx.strokeStyle = "#00ff00"; // green
+	  ctx.stroke();
+	}
+
+
+    ctx.restore();
+    ctx.fillStyle="#fff";
+    ctx.font="10px system-ui";
+    ctx.textAlign="center";
+    ctx.fillText(`${rank} (${absNorm.toFixed(2)}) ${this.foodEaten.toFixed(0)}`,this.x,this.y-10);
+    ctx.fillStyle="#aaa";
+    ctx.font="9px system-ui";
+    ctx.fillText(
+	  `#${this.birthId}  G${this.generation}  A${Math.floor(this.age)}  E${this.energy.toFixed(0)}  S${this.score.toFixed(4)}`,
+	  this.x,this.y+14
+	);
+  }
+}
+
+/* =========================
+   WORLD
+========================= */
+let creatures=[];
+function init(){
+  initFood();
+  creatures=Array.from({length:cfg.POP_INIT},()=>new Creature());
+}
+init();
+
+function nearestFood(c){
+  let best=null,bd=1e9;
+  foods.forEach(f=>{
+    const d=(f.x-c.x)**2+(f.y-c.y)**2;
+    if(d<bd){bd=d;best=f;}
+  });
+  return best;
+}
+
+function getCreatureById(id){
+  return creatures.find(c => c.birthId === id);
+}
+
+
+function drawLineage(c){
+
+	if(!showChampionSenses || !c) return;
+  // no parents or too old -> nothing to draw
+  if(!c.parents) return;
+
+  const ageSinceBirth = (performance.now() * 0.001) - c.birthTime;
+  if(ageSinceBirth > cfg.LINEAGE_DRAW_TIME) return;
+
+  // fade out linearly over time
+  const t = 1 - ageSinceBirth / cfg.LINEAGE_DRAW_TIME;
+  const alpha = cfg.LINEAGE_ALPHA * t;
+
+  ctx.save();
+  ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+  ctx.lineWidth = 1;
+
+  for(const pid of c.parents){
+    const p = getCreatureById(pid);
+    if(!p) continue;
+
+    ctx.beginPath();
+    ctx.moveTo(c.x, c.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function averageEliteAge() {
+  if (eliteArchive.length === 0) return 0;
+  let s = 0;
+  for (const e of eliteArchive){
+	s += e.creature.age;
+  }
+  return s / eliteArchive.length;
+}
+
+function pad(n, width) {
+  return String(n).padStart(width, "0");
+}
+
+
+function drawChampionSenses(c){
+  // do nothing if toggle is off or creature is missing
+  if(!showChampionSenses || !c) return;
+
+  ctx.save();
+
+  // --- FOOD SENSE LINES ---
+  // these correspond exactly to the 3 food entries fed into the NN
+  const foodsSeen = nearestFoods(c, 3);
+  for(const f of foodsSeen){
+    if(!f) continue;
+
+    // compute wrapped distance exactly like movement space
+	const dx = f.x - c.x;
+	const dy = f.y - c.y;
+	const d = Math.hypot(dx, dy);
+
+	// skip food outside sensing radius since NN input is zero there
+	if (d > cfg.SENSE_RADIUS) continue;
+
+	// alpha fades with distance so closer food "matters more visually"
+	const alpha = 1 - d / cfg.SENSE_RADIUS;
+
+    ctx.strokeStyle = `rgba(0,255,0,${alpha})`; // green = food
+    ctx.lineWidth = 1;
+
+    ctx.beginPath();
+    ctx.moveTo(c.x, c.y);
+    ctx.lineTo(f.x, f.y);
+    ctx.stroke();
+  }
+
+  // --- CREATURE SENSE LINES ---
+  // these correspond to the 3 nearest other creatures in NN inputs
+  const creaturesSeen = nearestCreatures(c, 3);
+  for(const o of creaturesSeen){
+    if(!o) continue;
+
+    const dx = o.x - c.x;
+    const dy = o.y - c.y;
+    const d = Math.hypot(dx, dy);
+    const alpha = clamp(1 - d / cfg.SENSE_RADIUS, 0, 1);
+
+    ctx.strokeStyle = `rgba(255,120,0,${alpha})`; // orange = competitors
+    ctx.lineWidth = 1;
+
+    ctx.beginPath();
+    ctx.moveTo(c.x, c.y);
+    ctx.lineTo(o.x, o.y);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+window.addEventListener("keydown", e => {
+  if (e.key === "l") {
+    fileInput.click();
+  }
+  
+   // toggle champion sensory visualization
+  if (e.key === "s" || e.key === "S") {
+    showChampionSenses = !showChampionSenses;
+  }
+});
+
+canvas.addEventListener("click", e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  const c = getCreatureAt(mx, my);
+  if (!c) return;
+  
+  const scoreInt = Math.floor(c.score * 100);
+
+  // package exactly what you already expect on load
+  saveJSON({
+    type: "manual-save",
+    genome: c.genome,
+    generation: c.generation,
+    age: c.age,
+	version: 1,
+    score: c.score,
+    timestamp: Date.now(),
+	 architecture: {
+		N_IN: cfg.N_IN,
+		N_H: cfg.N_H,
+		N_OUT: cfg.N_OUT,
+		N_MEM: cfg.N_MEM
+	  }
+  }, `manual-save${pad(scoreInt, 8)}_age${pad(Math.floor(c.age), 5)}_gen${pad(c.generation, 5)}_id${pad(c.birthId, 9)}_eaten${pad(c.foodEaten, 3)}.json`);
+});
+
+fileInput.addEventListener("change", e => {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+
+  for (const file of files) {
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        loadGenome(data);
+      } catch (err) {
+        console.warn("Failed to load genome file:", file.name);
+      }
+    };
+
+    reader.readAsText(file);
+  }
+
+  // allow re-loading the same files later
+  fileInput.value = "";
+});
+
+/* =========================
+   LOOP
+========================= */
+function tick(){
+  creatures.forEach(c=>{
+    c.step(nearestFoods(c), nearestCreatures(c));
+    c.tryEat();
+  });
+
+  const parents=creatures.filter(c=>c.canReproduce());
+
+  function pickWeighted(arr){
+    const base=0.15;
+    const total=arr.reduce((s,c)=>s+base+Math.sqrt(Math.max(0.01,c.score)),0.75);
+    let r=Math.random()*total;
+    for(const c of arr){
+      r-=base+Math.sqrt(Math.max(0.01,c.score));
+      if(r<=0) return c;
+    }
+    return arr[arr.length-1];
+  }
+
+  const attempts=Math.floor(parents.length/2);
+  for(let i=0;i<attempts;i++){
+    const a=pickWeighted(parents);
+    const b=pickWeighted(parents);
+    if(!a||!b||a===b) continue;
+    const burst = (Math.random() < 1/100);
+	const w = Brain.mutate(
+	  Brain.crossover(a.genome, b.genome),
+	  burst ? 3.0 : 1.0,   // rate multiplier
+	  burst ? 2.5 : 1.0    // scale multiplier
+	);
+    const child=new Creature(w,[a,b]);
+	child.isBurst = burst;
+	const fitter = a.score >= b.score ? a : b;
+
+	//child.x = fitter.x;
+	//child.y = fitter.y;
+    
+    a.energy-=cfg.REPRO_COST;
+    b.energy-=cfg.REPRO_COST;
+    a.cooldown=b.cooldown=cfg.REPRO_COOLDOWN;
+    a.children++; b.children++;
+    creatures.push(child);
+  }
+
+  creatures=creatures.filter(c=>c.energy>0);
+  
+  if(creatures.length>cfg.POP_MAX){
+    creatures.sort((a,b)=>b.score-a.score);
+    creatures.length=cfg.POP_MAX;
+  }
+  if(creatures.length<cfg.POP_MIN){
+    const best=creatures[0];
+	const parents=creatures.filter(c=>c.canReproduce());
+	
+    while (creatures.length < cfg.POP_MIN) {
+	  // pick a second parent distinct from best
+	  var other = pickWeighted(parents);
+	  
+	  // A quarter of the time choose the best, otherwise choose someone that can breed
+	  if(Math.random() < .25){
+		other = best;
+	  }
+	  const other2 = pickWeighted(parents.filter(c => c !== other));
+	  if (!other || !other2) break;
+
+	  const w = Brain.mutate(
+		Brain.crossover(other2.genome, other.genome)
+	  );
+
+	  const child = new Creature(w, [other2, other]);
+
+	  // optional: spawn near best to avoid instant death
+	  
+	  /*
+	  if(Math.random() < .33){
+		child.x = other2.x;
+	    child.y = best.y;
+	  }else if (Math.random() < .66){
+		child.x = other.x;
+	    child.y = other2.y;
+	  }else{
+		child.x = other.x/1.2;
+	    child.y = other2.y/2;
+	  }
+	  */
+	  
+
+	  creatures.push(child);
+	}
+  }
+
+  ctx.clearRect(0,0,cfg.W,cfg.H);
+  foods.forEach(f=>{
+    ctx.fillStyle="#6f6";
+    ctx.beginPath();
+    ctx.arc(f.x,f.y,3,0,Math.PI*2);
+    ctx.fill();
+  });
+
+  creatures.sort((a,b)=>b.score-a.score);
+  const max=creatures[0]?.score||1;
+  
+  // rank 1 creature is the current evolutionary champion
+	const champion = creatures[0];
+
+	// draw what the champion currently "sees"
+	drawChampionSenses(champion);
+  
+  
+  
+  bestFitnessEver=Math.max(bestFitnessEver,max);
+
+  creatures.forEach((c,i)=>{
+    const absNorm=clamp(c.score/(bestFitnessEver||1),0,1);
+    c.draw(i+1,absNorm);
+  });
+  
+  // draw parent-child lineage links for recently born creatures
+	creatures.forEach(c => drawLineage(c))
+  
+	for (const c of creatures) {
+
+	  // ignore very young creatures
+	  if (c.age < 100) continue;
+
+	  // check if this creature is meaningfully different
+	  let tooSimilar = false;
+	  for (const e of eliteArchive) {
+		if (genomeDistance(c.genome, e.genome) < 0.11) {
+		  tooSimilar = true;
+		  break;
+		}
+	  }
+	  if (tooSimilar) continue;
+
+	  // only save if it's among the best performers so far
+	  const eliteAvg = averageEliteAge();
+
+	// if archive is empty, allow the first few elites freely
+	const qualifies =
+	  eliteArchive.length === 0 ||
+	  c.age > eliteAvg * 1.05; // must beat archive mean by ~5%
+
+	if (qualifies) {
+
+		eliteArchive.push({
+		  age: c.age,
+		  generation: c.generation,
+		  score: c.score,
+		  genome: c.genome,
+		  creature: c
+		});
+		
+		const scoreInt = Math.floor(c.score * 100);
+
+		saveJSON({
+		  type: "elite-archive",
+		  age: c.age,
+		  version: 1,
+		  generation: c.generation,
+		  score: c.score,
+		  genome: c.genome,
+		  timestamp: Date.now(),
+		  architecture: {
+			N_IN: cfg.N_IN,
+			N_H: cfg.N_H,
+			N_OUT: cfg.N_OUT,
+			N_MEM: cfg.N_MEM
+		  }
+		}, `elite_score${pad(scoreInt, 8)}_age${pad(Math.floor(c.age), 5)}_gen${pad(c.generation, 5)}_id${pad(c.birthId, 9)}_eaten${pad(c.foodEaten, 3)}.json`);
+
+		// keep archive from growing unbounded
+		if (eliteArchive.length > 50) {
+		  eliteArchive.shift();
+		}
+	  }
+	}
+
+	
+	// periodically measure crude genetic diversity using genome-derived colors
+	const now = performance.now() * 0.001;
+	if (now - lastDiversityCheck > 2.0) { // check every 2 seconds
+	  lastDiversityCheck = now;
+
+	  cachedDiversity = populationBrainDiversity(creatures);
+	}
+	
+	// inject a rare immigrant if diversity collapses
+	const IMMIGRANT_COOLDOWN = 45; // seconds between possible injections
+
+	if (
+	  cachedDiversity < DIVERSITY_FLOOR &&
+	  now - lastImmigrantTime > IMMIGRANT_COOLDOWN
+	) {
+	  lastImmigrantTime = now;
+
+	  let genome;
+
+	  if (Math.random() < 0.5) {
+		// fully random immigrant (explores new space)
+		genome = null; // constructor will randomize
+	  } else {
+		// heavily mutated existing genome (explores nearby space)
+		const seed = creatures[Math.floor(Math.random() * creatures.length)];
+		genome = Brain.mutate(
+		  seed.genome,
+		  3.0,  // much higher mutation rate
+		  4.0   // much larger mutation scale
+		);
+	  }
+
+	  const immigrant = new Creature(genome, null);
+
+	  // mark so we can see them (optional but very useful)
+	  immigrant.isImmigrant = true;
+
+	  creatures.push(immigrant);
+	}
+	
+	const avgAge =
+  creatures.reduce((s,c)=>s+c.age,0) / (creatures.length || 1);
+
+ const avgFitness =
+  creatures.reduce((s,c)=>s+c.score,0) / (creatures.length || 1);
+  
+  const oldestAlive =
+  creatures.reduce((m,c)=>Math.max(m,c.age),0);
+  
+  if (oldestAlive >= oldestAgeEver){
+	oldestAgeEver = oldestAlive;
+  }
+
+  const mostEaten =
+  creatures.reduce((m,c)=>Math.max(m,c.foodEaten),0);
+  
+  if (mostEaten >= mostEatenEver){
+	  mostEatenEver = mostEaten;
+  }
+
+  minGeneration =
+  creatures.reduce((m,c)=>Math.min(m,c.generation), 100000000);
+
+  maxGeneration =
+  creatures.reduce((m,c)=>Math.max(m,c.generation),0);
+
+  const minID =
+  creatures.reduce((m,c)=>Math.min(m,c.birthId), 100000000);
+
+  const maxID =
+  creatures.reduce((m,c)=>Math.max(m,c.birthId),0);
+  
+  // only save if it's among the best performers so far
+	  const eliteAvg = averageEliteAge();
+
+hud.innerHTML=
+  `Population: ${creatures.length}<br>`+
+  `Best (alive): ${max.toFixed(2)}<br>`+
+  `Best ever: ${bestFitnessEver.toFixed(2)}<br>`+
+  `Avg fitness: ${avgFitness.toFixed(2)}<br>`+
+  `Avg age: ${avgAge.toFixed(1)} s<br>`+
+  `Oldest alive: ${oldestAlive.toFixed(1)} s<br>`+
+  `Oldest ever: ${oldestAgeEver.toFixed(1)} s<br>`+
+  `Most eaten ever: ${mostEatenEver.toFixed(0)}<br>`+
+  `Champion max children: ${champion.maxChildren}<br>`+
+  `Generation: ${minGeneration} - ${maxGeneration}<br>`+
+  `ID: ${minID} - ${maxID}<br>`+
+  `Average Elite age: ${eliteAvg}<br>`+
+  `Diversity: ${(cachedDiversity * 100).toFixed(1)}%<br>`+
+  `Food clusters: ${cfg.FOOD_CLUSTERS}<br>`;
+
+  requestAnimationFrame(tick);
+}
+tick();
+
+})();
+
+
+
+</script>
+</body>
+</html>

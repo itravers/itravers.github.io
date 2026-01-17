@@ -1,0 +1,1875 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Neuro Evolution Sandbox (Prey vs Predator) - Enhanced</title>
+<style>
+  html, body { margin:0; padding:0; background:#111; overflow:hidden; font-family: system-ui, sans-serif; }
+  canvas { display:block; }
+  
+  #hud{
+    position:fixed; left:10px; top:10px;
+    color:#ddd; font-family:system-ui, sans-serif; font-size:13px;
+    background:rgba(0,0,0,0.7); padding:10px; border-radius:10px;
+    line-height: 1.35;
+    max-width: 520px;
+    backdrop-filter: blur(5px);
+    z-index: 1000;
+  }
+  
+  #graphPanel {
+    position: fixed;
+    right: 10px;
+    top: 10px;
+    width: 420px;
+    background: rgba(0,0,0,0.85);
+    border-radius: 10px;
+    padding: 10px;
+    color: white;
+    font-family: monospace;
+    font-size: 12px;
+    max-height: 90vh;
+    overflow-y: auto;
+    z-index: 1000;
+    border: 1px solid #333;
+  }
+  
+  #visionPanel {
+    position: fixed;
+    left: 10px;
+    bottom: 10px;
+    width: 320px;
+    height: 220px;
+    background: rgba(0,0,0,0.85);
+    border-radius: 10px;
+    padding: 10px;
+    color: white;
+    z-index: 1000;
+    border: 1px solid #333;
+  }
+  
+  #playerControls {
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
+    background: rgba(0,0,0,0.85);
+    padding: 10px;
+    border-radius: 10px;
+    color: white;
+    z-index: 1000;
+    border: 1px solid #333;
+    width: 200px;
+  }
+  
+  .graph {
+    margin-bottom: 20px;
+    border-bottom: 1px solid #333;
+    padding-bottom: 10px;
+  }
+  
+  .graph canvas {
+    background: rgba(20,20,30,0.5);
+    border-radius: 5px;
+    margin-top: 5px;
+  }
+  
+  .graph h4 {
+    margin: 5px 0;
+    color: #8cf;
+    font-size: 12px;
+  }
+  
+  button {
+    background: #444;
+    color: white;
+    border: 1px solid #666;
+    padding: 5px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  
+  button:hover {
+    background: #555;
+  }
+  
+  .toggle-btn {
+    margin-right: 5px;
+    margin-bottom: 5px;
+  }
+  
+  #geneticPanel {
+    position: fixed;
+    right: 440px;
+    top: 10px;
+    width: 300px;
+    background: rgba(0,0,0,0.85);
+    border-radius: 10px;
+    padding: 10px;
+    color: white;
+    z-index: 1000;
+    border: 1px solid #333;
+  }
+  
+  .color-square {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 5px;
+    vertical-align: middle;
+    border: 1px solid #555;
+  }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<canvas id="c"></canvas>
+
+<!-- Graph Panel -->
+<div id="graphPanel">
+  <div style="display: flex; justify-content: space-between; align-items: center;">
+    <h3 style="margin: 0; color: #8cf;">Simulation Analytics</h3>
+    <button id="toggleGraphs">📈 Toggle</button>
+  </div>
+  <div id="graphsContainer"></div>
+</div>
+
+<!-- Vision Panel -->
+<div id="visionPanel">
+  <h4 style="margin: 0 0 10px 0; color: #8cf;">Creature Vision</h4>
+  <div style="font-size: 11px; margin-bottom: 5px;">
+    <button class="toggle-btn" id="toggleVision">👁️ Toggle Vision</button>
+    <span id="visionInfo"></span>
+  </div>
+  <canvas id="visionCanvas" width="300" height="180"></canvas>
+</div>
+
+<!-- Player Controls -->
+<div id="playerControls">
+  <h4 style="margin: 0; color: #8cf;">👤 Player Controls</h4>
+  <div style="margin-top: 8px;">
+    <label><input type="checkbox" id="playerToggle"> Enable Player</label><br>
+    <div id="playerKeys" style="margin-top: 8px; font-size: 11px; color: #ccc;">
+      WASD: Move<br>
+      Space: Boost<br>
+      Shift: Brake<br>
+      E: Attack<br>
+      C: Toggle Color Mode
+    </div>
+    <div id="playerStats" style="margin-top: 8px; font-size: 11px;"></div>
+  </div>
+</div>
+
+<!-- Genetic Analysis Panel -->
+<div id="geneticPanel">
+  <h4 style="margin: 0 0 10px 0; color: #8cf;">🧬 Genetic Analysis</h4>
+  <div style="font-size: 11px;">
+    <button class="toggle-btn" id="toggleGenetic">🧬 Toggle View</button>
+    <button class="toggle-btn" id="colorMode">🎨 Color Mode</button>
+  </div>
+  <div id="geneticInfo" style="margin-top: 10px; font-size: 11px; line-height: 1.4;">
+    <div>Prey Diversity: <span id="preyDiv">0</span>%</div>
+    <div>Pred Diversity: <span id="predDiv">0</span>%</div>
+    <div>Avg Genome Distance: <span id="avgDist">0</span></div>
+    <div>Evolution Rate: <span id="evolRate">0</span></div>
+  </div>
+  <canvas id="geneticCanvas" width="280" height="150" style="margin-top: 10px;"></canvas>
+</div>
+
+<script>
+(() => {
+/* =========================================================
+   CONFIG (enhanced)
+========================================================= */
+const cfg = {
+  W: innerWidth,
+  H: innerHeight,
+
+  // Prey pop
+  PREY_INIT: 40,
+  PREY_MIN: 30,
+  PREY_MAX: 70,
+
+  // Predator pop (significantly less)
+  PRED_INIT: 4,
+  PRED_MIN: 3,
+  PRED_MAX: 10,
+
+  // Food (clustered)
+  FOOD_CLUSTERS: 6,
+  FOOD_PER_CLUSTER: 18,
+  FOOD_RADIUS: 160,
+  FOOD_ENERGY: 26,
+
+  DT: 1/60,
+
+  // Base movement (already slowed vs earlier fast version)
+  SPEED_LIMIT: 80,
+  ACCEL: 110,
+  TURN_LIMIT: 4.5,
+  TURN_ACCEL: 6.5,
+  FRICTION: 0.985,
+
+  // Boost and brake (kept)
+  BOOST_MULT: 3.0,
+  BOOST_COST: 18,
+  BOOST_COOLDOWN: 2.5,
+
+  BRAKE_FORCE: 0.25,
+  BRAKE_COST: 6,
+  BRAKE_COOLDOWN: 1.5,
+
+  // Energy model (kept)
+  ENERGY_INIT: 70,
+  ENERGY_MAX: 160,
+  ENERGY_DECAY: 2.2,
+  ENERGY_MOVE_COST: 0.012,
+  ENERGY_TURN_COST: 0.35,
+
+  // Repro (kept style)
+  REPRO_THRESHOLD: 120,
+  REPRO_COST: 55,
+  REPRO_COOLDOWN: 3.0,
+
+  // Evolution
+  MUT_RATE: 0.12,
+  MUT_SCALE: 0.4,
+  WEIGHT_CLAMP: 3.0,
+
+  // Sensing and collision
+  SENSE_RADIUS: 240,
+  EAT_RADIUS: 8,
+
+  // Prey vs predator interaction - ENHANCED for better predation
+  ATTACK_RADIUS: 10,
+  ATTACK_DRAIN: 32,          // Increased from 22
+  ATTACK_GAIN: 28,           // Increased from 18
+  ATTACK_COOLDOWN: 0.5,      // New: prevent spam attacks
+  PREDATOR_FOOD_PENALTY: 5,  // Increased penalty
+  PREDATOR_FOOD_ENERGY: -12, // Increased penalty
+
+  // NN: enhanced with social inputs
+  N_IN: 20,      // Increased from 16: added social inputs
+  N_H: 14,       // Increased hidden neurons
+  N_OUT: 4       // thrust, turn, boost, brake
+  
+  // Note: Graph configs added in setupGraphs()
+};
+
+/* =========================================================
+   CANVAS
+========================================================= */
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const hud = document.getElementById("hud");
+const visionCanvas = document.getElementById("visionCanvas");
+const visionCtx = visionCanvas.getContext("2d");
+const geneticCanvas = document.getElementById("geneticCanvas");
+const geneticCtx = geneticCanvas.getContext("2d");
+
+function resize(){
+  canvas.width = cfg.W = innerWidth;
+  canvas.height = cfg.H = innerHeight;
+}
+addEventListener("resize", resize);
+resize();
+
+/* =========================================================
+   GLOBAL FITNESS TRACKING
+========================================================= */
+let bestFitnessEverPrey = 0;
+let bestFitnessEverPred = 0;
+
+/* =========================================================
+   UTIL
+========================================================= */
+const rand=(a=0,b=1)=>a+Math.random()*(b-a);
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const len=(x,y)=>Math.hypot(x,y);
+const wrap=(x,m)=>x<0?x+m:(x>=m?x-m:x);
+const tanh=Math.tanh;
+const sigmoid=x=>1/(1+Math.exp(-x));
+const dist=(x1,y1,x2,y2)=>Math.hypot(x2-x1,y2-y1);
+const angleDiff=(a,b)=>Math.atan2(Math.sin(a-b), Math.cos(a-b));
+
+/* =========================================================
+   PLAYER CONTROLS
+========================================================= */
+class Player {
+  constructor() {
+    this.x = cfg.W/2;
+    this.y = cfg.H/2;
+    this.vx = 0;
+    this.vy = 0;
+    this.angle = 0;
+    this.omega = 0;
+    this.energy = 1000; // Player is immortal
+    this.score = 0;
+    this.boostCD = 0;
+    this.brakeCD = 0;
+    this.attackCD = 0;
+    this.radius = 12;
+    this.kills = 0;
+    this.active = false;
+    this.colorMode = 0; // 0: normal, 1: energy, 2: age, 3: fitness
+    
+    // Controls
+    this.keys = {
+      w: false, a: false, s: false, d: false,
+      space: false, shift: false, e: false
+    };
+  }
+  
+  update(dt) {
+    if (!this.active) return;
+    
+    // Rotation
+    if (this.keys.a) this.omega -= 8 * dt;
+    if (this.keys.d) this.omega += 8 * dt;
+    this.omega = clamp(this.omega, -6, 6);
+    this.angle += this.omega * dt;
+    this.omega *= 0.9;
+    
+    // Thrust
+    let thrust = 0;
+    if (this.keys.w) thrust = 1;
+    if (this.keys.s) thrust = -0.5;
+    
+    const accel = 120;
+    const ax = Math.cos(this.angle) * thrust * accel;
+    const ay = Math.sin(this.angle) * thrust * accel;
+    this.vx += ax * dt;
+    this.vy += ay * dt;
+    
+    // Boost
+    if (this.keys.space && this.boostCD <= 0) {
+      this.vx *= 1.5;
+      this.vy *= 1.5;
+      this.boostCD = 1.0;
+    }
+    
+    // Brake
+    if (this.keys.shift && this.brakeCD <= 0) {
+      this.vx *= 0.3;
+      this.vy *= 0.3;
+      this.brakeCD = 0.5;
+    }
+    
+    // Speed limit
+    const sp = len(this.vx, this.vy);
+    const speedLimit = 100;
+    if (sp > speedLimit) {
+      const s = speedLimit / sp;
+      this.vx *= s;
+      this.vy *= s;
+    }
+    
+    // Attack
+    if (this.keys.e && this.attackCD <= 0) {
+      this.attack();
+      this.attackCD = 0.3;
+    }
+    
+    // Update position
+    this.x = wrap(this.x + this.vx * dt, cfg.W);
+    this.y = wrap(this.y + this.vy * dt, cfg.H);
+    this.vx *= 0.97;
+    this.vy *= 0.97;
+    
+    // Cooldowns
+    this.boostCD = Math.max(0, this.boostCD - dt);
+    this.brakeCD = Math.max(0, this.brakeCD - dt);
+    this.attackCD = Math.max(0, this.attackCD - dt);
+  }
+  
+  attack() {
+    for (const creature of prey) {
+      const d = dist(this.x, this.y, creature.x, creature.y);
+      if (d < this.radius + 8) {
+        creature.energy -= 50;
+        this.score += 10;
+        this.kills++;
+        if (creature.energy <= 0) {
+          // Visual feedback
+          createParticles(creature.x, creature.y, 10, '#ff5555');
+        }
+      }
+    }
+  }
+  
+  draw() {
+    if (!this.active) return;
+    
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+    
+    // Player as special predator
+    ctx.fillStyle = '#ff3366';
+    ctx.beginPath();
+    ctx.moveTo(12, 0);
+    ctx.lineTo(-8, 8);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-8, -8);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Outline
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    // Attack radius when cooldown is ready
+    if (this.attackCD <= 0) {
+      ctx.strokeStyle = 'rgba(255, 50, 50, 0.3)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.radius + 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    
+    ctx.restore();
+    
+    // Draw player stats
+    document.getElementById('playerStats').innerHTML = 
+      `Kills: ${this.kills}<br>Score: ${this.score}`;
+  }
+}
+
+const player = new Player();
+
+// Keyboard controls
+document.addEventListener('keydown', (e) => {
+  if (!player.active) return;
+  
+  switch(e.key.toLowerCase()) {
+    case 'w': player.keys.w = true; break;
+    case 'a': player.keys.a = true; break;
+    case 's': player.keys.s = true; break;
+    case 'd': player.keys.d = true; break;
+    case ' ': player.keys.space = true; break;
+    case 'shift': player.keys.shift = true; break;
+    case 'e': player.keys.e = true; break;
+    case 'c': 
+      player.colorMode = (player.colorMode + 1) % 4;
+      break;
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (!player.active) return;
+  
+  switch(e.key.toLowerCase()) {
+    case 'w': player.keys.w = false; break;
+    case 'a': player.keys.a = false; break;
+    case 's': player.keys.s = false; break;
+    case 'd': player.keys.d = false; break;
+    case ' ': player.keys.space = false; break;
+    case 'shift': player.keys.shift = false; break;
+    case 'e': player.keys.e = false; break;
+  }
+});
+
+// Player toggle
+document.getElementById('playerToggle').addEventListener('change', (e) => {
+  player.active = e.target.checked;
+  if (player.active) {
+    player.x = cfg.W/2;
+    player.y = cfg.H/2;
+  }
+});
+
+/* =========================================================
+   BRAIN (enhanced with social inputs)
+========================================================= */
+class Brain{
+  constructor(w=null){
+    this.w = w ? w.slice() : Array.from({length:this.count()},()=>rand(-1,1));
+    this.r = 0; // recurrent state
+  }
+
+  // Weight layout with social inputs
+  count(){
+    const hidden = cfg.N_H*(cfg.N_IN+1);
+    const rec = (cfg.N_IN + 1 + 1);
+    const out = cfg.N_OUT*((cfg.N_H + 1)+1);
+    return hidden + rec + out;
+  }
+
+  forward(inp){
+    let i=0;
+
+    // Hidden layer
+    const h = new Array(cfg.N_H);
+    for(let n=0;n<cfg.N_H;n++){
+      let s=0;
+      for(let k=0;k<cfg.N_IN;k++) s += this.w[i++]*inp[k];
+      s += this.w[i++]; // bias
+      h[n] = tanh(s);
+    }
+
+    // Recurrent neuron
+    let rs=0;
+    for(let k=0;k<cfg.N_IN;k++) rs += this.w[i++]*inp[k];
+    rs += this.w[i++];        // bias
+    const wSelf = this.w[i++];// self weight
+    rs += this.r * wSelf;
+    this.r = tanh(rs);
+
+    // Output layer
+    const outRaw = new Array(cfg.N_OUT);
+    for(let o=0;o<cfg.N_OUT;o++){
+      let s=0;
+      for(let k=0;k<cfg.N_H;k++) s += this.w[i++]*h[k];
+      s += this.w[i++]*this.r; // recurrent feature weight
+      s += this.w[i++];        // bias
+      outRaw[o]=s;
+    }
+
+    return [
+      sigmoid(outRaw[0]), // thrust 0..1
+      tanh(outRaw[1]),    // turn -1..1
+      sigmoid(outRaw[2]), // boost 0..1 (thresholded)
+      sigmoid(outRaw[3])  // brake 0..1 (thresholded)
+    ];
+  }
+
+  static crossover(a,b){
+    const p=Math.floor(rand(1,a.length-1));
+    return a.map((v,i)=>i<p?v:b[i]);
+  }
+
+  static mutate(w){
+    return w.map(v=>{
+      if(Math.random()<cfg.MUT_RATE){
+        v += rand(-1,1)*cfg.MUT_SCALE;
+        v = clamp(v, -cfg.WEIGHT_CLAMP, cfg.WEIGHT_CLAMP);
+      }
+      return v;
+    });
+  }
+}
+
+/* =========================================================
+   GENETIC ANALYSIS TOOLS
+========================================================= */
+class GeneticAnalyzer {
+  static calculateDiversity(population) {
+    if (population.length < 2) return 0;
+    
+    let totalDistance = 0;
+    let comparisons = 0;
+    
+    for (let i = 0; i < Math.min(10, population.length); i++) {
+      for (let j = i + 1; j < Math.min(10, population.length); j++) {
+        const dist = this.genomeDistance(population[i].genome, population[j].genome);
+        totalDistance += dist;
+        comparisons++;
+      }
+    }
+    
+    return comparisons > 0 ? totalDistance / comparisons : 0;
+  }
+  
+  static genomeDistance(g1, g2) {
+    let sum = 0;
+    const len = Math.min(g1.length, g2.length);
+    for (let i = 0; i < len; i++) {
+      sum += Math.abs(g1[i] - g2[i]);
+    }
+    return sum / len;
+  }
+  
+  static getGenomeClusters(population, k=3) {
+    if (population.length < k) return [];
+    
+    // Simple k-means clustering
+    const genomes = population.map(p => p.genome);
+    const centroids = [];
+    
+    // Initialize centroids
+    for (let i = 0; i < k; i++) {
+      centroids.push(genomes[Math.floor(Math.random() * genomes.length)]);
+    }
+    
+    // Run a few iterations
+    for (let iter = 0; iter < 5; iter++) {
+      const clusters = new Array(k).fill().map(() => []);
+      
+      // Assign to nearest centroid
+      for (let i = 0; i < genomes.length; i++) {
+        let minDist = Infinity;
+        let bestCluster = 0;
+        for (let c = 0; c < k; c++) {
+          const dist = this.genomeDistance(genomes[i], centroids[c]);
+          if (dist < minDist) {
+            minDist = dist;
+            bestCluster = c;
+          }
+        }
+        clusters[bestCluster].push(i);
+      }
+      
+      // Update centroids
+      for (let c = 0; c < k; c++) {
+        if (clusters[c].length > 0) {
+          const avgGenome = new Array(genomes[0].length).fill(0);
+          for (const idx of clusters[c]) {
+            for (let g = 0; g < genomes[idx].length; g++) {
+              avgGenome[g] += genomes[idx][g];
+            }
+          }
+          for (let g = 0; g < avgGenome.length; g++) {
+            avgGenome[g] /= clusters[c].length;
+          }
+          centroids[c] = avgGenome;
+        }
+      }
+    }
+    
+    return centroids;
+  }
+  
+  static calculateEvolutionRate(population, prevAvgFitness) {
+    const currentAvg = population.reduce((sum, c) => sum + c.score, 0) / population.length;
+    return currentAvg - prevAvgFitness;
+  }
+}
+
+/* =========================================================
+   REAL-TIME GRAPHS
+========================================================= */
+class GraphManager {
+  constructor() {
+    this.graphs = {};
+    this.history = {
+      time: [],
+      preyPopulation: [],
+      predPopulation: [],
+      preyAvgFitness: [],
+      predAvgFitness: [],
+      preyBestFitness: [],
+      predBestFitness: [],
+      geneticDiversityPrey: [],
+      geneticDiversityPred: [],
+      avgAge: [],
+      avgGeneration: [],
+      attacksPerSec: [],
+      killsPerSec: []
+    };
+    this.maxHistory = 300;
+    this.lastAttackCount = 0;
+    this.lastKillCount = 0;
+    this.lastUpdateTime = 0;
+    
+    this.setupGraphs();
+    this.updateGraphVisibility();
+  }
+  
+  setupGraphs() {
+    const graphs = [
+      {
+        id: 'population',
+        title: '📊 Population',
+        color: '#4CAF50',
+        dataKeys: ['preyPopulation', 'predPopulation'],
+        colors: ['#4CAF50', '#F44336']
+      },
+      {
+        id: 'fitness',
+        title: '💪 Fitness',
+        color: '#FF9800',
+        dataKeys: ['preyAvgFitness', 'predAvgFitness'],
+        colors: ['#4CAF50', '#F44336']
+      },
+      {
+        id: 'bestFitness',
+        title: '🏆 Best Fitness',
+        color: '#9C27B0',
+        dataKeys: ['preyBestFitness', 'predBestFitness'],
+        colors: ['#4CAF50', '#F44336']
+      },
+      {
+        id: 'diversity',
+        title: '🧬 Genetic Diversity',
+        color: '#00BCD4',
+        dataKeys: ['geneticDiversityPrey', 'geneticDiversityPred'],
+        colors: ['#4CAF50', '#F44336']
+      },
+      {
+        id: 'stats',
+        title: '📈 Statistics',
+        color: '#795548',
+        dataKeys: ['avgAge', 'avgGeneration'],
+        colors: ['#FF9800', '#2196F3']
+      },
+      {
+        id: 'actions',
+        title: '⚔️ Actions/Second',
+        color: '#F44336',
+        dataKeys: ['attacksPerSec', 'killsPerSec'],
+        colors: ['#FF5722', '#E91E63']
+      }
+    ];
+    
+    graphs.forEach(graph => {
+      const div = document.createElement('div');
+      div.className = 'graph';
+      div.innerHTML = `
+        <h4>${graph.title}</h4>
+        <canvas id="${graph.id}Graph" width="400" height="80"></canvas>
+      `;
+      document.getElementById('graphsContainer').appendChild(div);
+      
+      this.graphs[graph.id] = {
+        canvas: document.getElementById(`${graph.id}Graph`),
+        ctx: document.getElementById(`${graph.id}Graph`).getContext('2d'),
+        config: graph
+      };
+    });
+    
+    // Toggle button
+    document.getElementById('toggleGraphs').addEventListener('click', () => {
+      const container = document.getElementById('graphsContainer');
+      container.style.display = container.style.display === 'none' ? 'block' : 'none';
+    });
+  }
+  
+  update(data) {
+    const currentTime = Date.now();
+    
+    // Calculate rates
+    if (this.lastUpdateTime > 0) {
+      const dt = (currentTime - this.lastUpdateTime) / 1000;
+      if (dt > 0) {
+        const attacksPerSec = (data.attacks - this.lastAttackCount) / dt;
+        const killsPerSec = (data.kills - this.lastKillCount) / dt;
+        this.history.attacksPerSec.push(attacksPerSec);
+        this.history.killsPerSec.push(killsPerSec);
+      }
+    }
+    
+    this.lastAttackCount = data.attacks;
+    this.lastKillCount = data.kills;
+    this.lastUpdateTime = currentTime;
+    
+    // Add data to history
+    Object.keys(data).forEach(key => {
+      if (this.history[key]) {
+        this.history[key].push(data[key]);
+        if (this.history[key].length > this.maxHistory) {
+          this.history[key].shift();
+        }
+      }
+    });
+    
+    // Time axis
+    this.history.time.push(Date.now());
+    if (this.history.time.length > this.maxHistory) {
+      this.history.time.shift();
+    }
+    
+    // Draw graphs
+    this.drawGraphs();
+  }
+  
+  drawGraphs() {
+    Object.values(this.graphs).forEach(graph => {
+      const { ctx, canvas, config } = graph;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      const dataKeys = config.dataKeys;
+      const colors = config.colors;
+      
+      // Draw grid
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 0.5;
+      
+      // Horizontal lines
+      for (let i = 0; i <= 5; i++) {
+        const y = i * (canvas.height / 5);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+      }
+      
+      // Plot each data series
+      dataKeys.forEach((key, idx) => {
+        const data = this.history[key];
+        if (!data || data.length < 2) return;
+        
+        ctx.strokeStyle = colors[idx];
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        
+        // Find min/max for scaling
+        const min = Math.min(...data);
+        const max = Math.max(...data);
+        const range = max - min || 1;
+        
+        // Draw line
+        for (let i = 0; i < data.length; i++) {
+          const x = (i / (this.maxHistory - 1)) * canvas.width;
+          const y = canvas.height - ((data[i] - min) / range) * canvas.height;
+          
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        
+        ctx.stroke();
+        
+        // Draw current value
+        const lastValue = data[data.length - 1];
+        ctx.fillStyle = colors[idx];
+        ctx.font = '10px monospace';
+        ctx.fillText(`${key.replace(/([A-Z])/g, ' $1')}: ${lastValue.toFixed(1)}`, 
+          5, 15 + idx * 12);
+      });
+    });
+  }
+  
+  updateGraphVisibility() {
+    // Can be expanded to show/hide specific graphs
+  }
+}
+
+/* =========================================================
+   CREATURE VISION VISUALIZATION
+========================================================= */
+class VisionVisualizer {
+  constructor() {
+    this.enabled = true;
+    this.currentSubject = null;
+    this.cycleTimer = 0;
+    this.cycleInterval = 3; // seconds
+    
+    document.getElementById('toggleVision').addEventListener('click', () => {
+      this.enabled = !this.enabled;
+    });
+  }
+  
+  update(dt, topPrey, topPred) {
+    if (!this.enabled) return;
+    
+    this.cycleTimer += dt;
+    if (this.cycleTimer >= this.cycleInterval) {
+      this.cycleTimer = 0;
+      // Cycle between top creatures
+      const subjects = [...topPrey.slice(0, 3), ...topPred.slice(0, 2)];
+      if (subjects.length > 0) {
+        this.currentSubject = subjects[Math.floor(Math.random() * subjects.length)];
+      }
+    }
+    
+    if (this.currentSubject && (prey.includes(this.currentSubject) || preds.includes(this.currentSubject))) {
+      this.drawVision(this.currentSubject);
+    } else {
+      this.clearVision();
+    }
+  }
+  
+  drawVision(creature) {
+    visionCtx.clearRect(0, 0, visionCanvas.width, visionCanvas.height);
+    
+    // Background
+    visionCtx.fillStyle = 'rgba(20, 20, 30, 0.8)';
+    visionCtx.fillRect(0, 0, visionCanvas.width, visionCanvas.height);
+    
+    // Draw creature in center
+    const centerX = visionCanvas.width / 2;
+    const centerY = visionCanvas.height / 2;
+    
+    visionCtx.save();
+    visionCtx.translate(centerX, centerY);
+    
+    // Draw creature
+    visionCtx.fillStyle = creature.species === 'prey' ? '#4CAF50' : '#F44336';
+    visionCtx.beginPath();
+    if (creature.species === 'prey') {
+      visionCtx.moveTo(8, 0);
+      visionCtx.lineTo(-6, 4);
+      visionCtx.lineTo(-6, -4);
+    } else {
+      visionCtx.moveTo(9, 0);
+      visionCtx.lineTo(0, 6);
+      visionCtx.lineTo(-7, 0);
+      visionCtx.lineTo(0, -6);
+    }
+    visionCtx.closePath();
+    visionCtx.fill();
+    
+    // Draw sensory ranges
+    const senseRadius = 50; // scaled for visualization
+    
+    // Food sensor (green)
+    const food = nearestFood(creature);
+    if (food) {
+      const angleToFood = Math.atan2(food.y - creature.y, food.x - creature.x) - creature.angle;
+      const distance = Math.min(dist(food.x, food.y, creature.x, creature.y), cfg.SENSE_RADIUS);
+      const scaledDist = (distance / cfg.SENSE_RADIUS) * senseRadius;
+      
+      visionCtx.strokeStyle = 'rgba(100, 255, 100, 0.5)';
+      visionCtx.lineWidth = 1;
+      visionCtx.beginPath();
+      visionCtx.moveTo(0, 0);
+      visionCtx.lineTo(Math.cos(angleToFood) * scaledDist, Math.sin(angleToFood) * scaledDist);
+      visionCtx.stroke();
+      
+      // Food dot
+      visionCtx.fillStyle = '#6f6';
+      visionCtx.beginPath();
+      visionCtx.arc(Math.cos(angleToFood) * scaledDist, Math.sin(angleToFood) * scaledDist, 3, 0, Math.PI * 2);
+      visionCtx.fill();
+    }
+    
+    // Threat sensor (red)
+    let threat = null;
+    if (creature.species === 'prey') {
+      threat = nearestPredator(creature);
+    } else if (player.active) {
+      // Predator's threat is player
+      threat = player;
+    }
+    
+    if (threat) {
+      const angleToThreat = Math.atan2(threat.y - creature.y, threat.x - creature.x) - creature.angle;
+      const distance = Math.min(dist(threat.x, threat.y, creature.x, creature.y), cfg.SENSE_RADIUS);
+      const scaledDist = (distance / cfg.SENSE_RADIUS) * senseRadius;
+      
+      visionCtx.strokeStyle = 'rgba(255, 100, 100, 0.5)';
+      visionCtx.lineWidth = 1;
+      visionCtx.beginPath();
+      visionCtx.moveTo(0, 0);
+      visionCtx.lineTo(Math.cos(angleToThreat) * scaledDist, Math.sin(angleToThreat) * scaledDist);
+      visionCtx.stroke();
+      
+      // Threat indicator
+      visionCtx.fillStyle = '#f66';
+      visionCtx.beginPath();
+      visionCtx.arc(Math.cos(angleToThreat) * scaledDist, Math.sin(angleToThreat) * scaledDist, 4, 0, Math.PI * 2);
+      visionCtx.fill();
+    }
+    
+    // Draw social inputs (nearby creatures)
+    const nearby = creature.species === 'prey' ? prey : preds;
+    let count = 0;
+    for (const other of nearby) {
+      if (other === creature) continue;
+      const d = dist(creature.x, creature.y, other.x, other.y);
+      if (d < cfg.SENSE_RADIUS / 2 && count < 5) {
+        const angleToOther = Math.atan2(other.y - creature.y, other.x - creature.x) - creature.angle;
+        const scaledDist = (d / cfg.SENSE_RADIUS) * senseRadius * 2;
+        
+        visionCtx.fillStyle = creature.species === 'prey' ? 'rgba(76, 175, 80, 0.3)' : 'rgba(244, 67, 54, 0.3)';
+        visionCtx.beginPath();
+        visionCtx.arc(Math.cos(angleToOther) * scaledDist, Math.sin(angleToOther) * scaledDist, 2, 0, Math.PI * 2);
+        visionCtx.fill();
+        count++;
+      }
+    }
+    
+    // Draw sensor circle
+    visionCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    visionCtx.lineWidth = 0.5;
+    visionCtx.beginPath();
+    visionCtx.arc(0, 0, senseRadius, 0, Math.PI * 2);
+    visionCtx.stroke();
+    
+    visionCtx.restore();
+    
+    // Info text
+    document.getElementById('visionInfo').textContent = 
+      `${creature.species} #${creature.id} | Fit: ${creature.score.toFixed(1)} | Age: ${creature.age.toFixed(1)}s`;
+  }
+  
+  clearVision() {
+    visionCtx.clearRect(0, 0, visionCanvas.width, visionCanvas.height);
+    visionCtx.fillStyle = 'rgba(20, 20, 30, 0.8)';
+    visionCtx.fillRect(0, 0, visionCanvas.width, visionCanvas.height);
+    visionCtx.fillStyle = '#666';
+    visionCtx.font = '12px monospace';
+    visionCtx.textAlign = 'center';
+    visionCtx.fillText('No creature selected', visionCanvas.width/2, visionCanvas.height/2);
+  }
+}
+
+/* =========================================================
+   GENETIC VISUALIZATION
+========================================================= */
+class GeneticVisualizer {
+  constructor() {
+    this.enabled = true;
+    this.colorMode = 0; // 0: hue, 1: fitness, 2: age, 3: generation
+    
+    document.getElementById('toggleGenetic').addEventListener('click', () => {
+      this.enabled = !this.enabled;
+    });
+    
+    document.getElementById('colorMode').addEventListener('click', () => {
+      this.colorMode = (this.colorMode + 1) % 4;
+      this.updateColorModeText();
+    });
+    
+    this.updateColorModeText();
+  }
+  
+  updateColorModeText() {
+    const modes = ['🎨 Lineage', '💪 Fitness', '⏳ Age', '🧬 Generation'];
+    document.getElementById('colorMode').textContent = modes[this.colorMode];
+  }
+  
+  drawGeneticSpace() {
+    if (!this.enabled) return;
+    
+    geneticCtx.clearRect(0, 0, geneticCanvas.width, geneticCanvas.height);
+    
+    // Draw background
+    geneticCtx.fillStyle = 'rgba(20, 20, 30, 0.8)';
+    geneticCtx.fillRect(0, 0, geneticCanvas.width, geneticCanvas.height);
+    
+    // Simple 2D projection of genomes
+    const margin = 10;
+    const width = geneticCanvas.width - margin * 2;
+    const height = geneticCanvas.height - margin * 2;
+    
+    // Draw prey genomes
+    for (const creature of prey.slice(0, 30)) { // Limit to 30 for performance
+      const x = margin + (creature.genome[0] * 0.5 + 0.5) * width;
+      const y = margin + (creature.genome[1] * 0.5 + 0.5) * height;
+      
+      geneticCtx.fillStyle = this.getCreatureColor(creature, 0.7);
+      geneticCtx.beginPath();
+      geneticCtx.arc(x, y, 3, 0, Math.PI * 2);
+      geneticCtx.fill();
+    }
+    
+    // Draw predator genomes
+    for (const creature of preds.slice(0, 20)) {
+      const x = margin + (creature.genome[2] * 0.5 + 0.5) * width;
+      const y = margin + (creature.genome[3] * 0.5 + 0.5) * height;
+      
+      geneticCtx.fillStyle = this.getCreatureColor(creature, 0.7);
+      geneticCtx.beginPath();
+      geneticCtx.arc(x, y, 4, 0, Math.PI * 2);
+      geneticCtx.fill();
+    }
+    
+    // Draw grid
+    geneticCtx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+    geneticCtx.lineWidth = 0.5;
+    
+    // Draw legend
+    geneticCtx.fillStyle = '#fff';
+    geneticCtx.font = '9px monospace';
+    geneticCtx.fillText(`Prey: ${prey.length}`, 5, 15);
+    geneticCtx.fillText(`Pred: ${preds.length}`, 5, 28);
+  }
+  
+  getCreatureColor(creature, alpha = 1) {
+    switch(this.colorMode) {
+      case 0: // Lineage (hue)
+        return `hsla(${creature.hue}, 70%, 50%, ${alpha})`;
+      case 1: // Fitness
+        const fitNorm = clamp(creature.score / Math.max(bestFitnessEverPrey, bestFitnessEverPred, 1), 0, 1);
+        const r = Math.floor(50 + fitNorm * 205);
+        const g = Math.floor(50 + (1 - fitNorm) * 205);
+        return `rgba(${r}, ${g}, 50, ${alpha})`;
+      case 2: // Age
+        const ageNorm = clamp(creature.age / 30, 0, 1);
+        return `hsla(${240 - ageNorm * 120}, 70%, 50%, ${alpha})`;
+      case 3: // Generation
+        const genNorm = clamp(creature.generation / 20, 0, 1);
+        return `hsla(${genNorm * 360}, 70%, 50%, ${alpha})`;
+    }
+  }
+  
+  updateStats() {
+    const preyDiversity = GeneticAnalyzer.calculateDiversity(prey);
+    const predDiversity = GeneticAnalyzer.calculateDiversity(preds);
+    const avgDist = (preyDiversity + predDiversity) / 2;
+    
+    document.getElementById('preyDiv').textContent = (preyDiversity * 100).toFixed(1);
+    document.getElementById('predDiv').textContent = (predDiversity * 100).toFixed(1);
+    document.getElementById('avgDist').textContent = avgDist.toFixed(3);
+  }
+}
+
+/* =========================================================
+   PARTICLE SYSTEM (for effects)
+========================================================= */
+const particles = [];
+function createParticles(x, y, count, color) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: rand(-30, 30),
+      vy: rand(-30, 30),
+      life: 1.0,
+      decay: rand(0.02, 0.05),
+      color: color,
+      size: rand(2, 5)
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= p.decay;
+    p.vx *= 0.95;
+    p.vy *= 0.95;
+    
+    if (p.life <= 0) {
+      particles.splice(i, 1);
+    }
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* =========================================================
+   FOOD (clustered) - unchanged
+========================================================= */
+const clusters=[], foods=[];
+function initFood(){
+  clusters.length=foods.length=0;
+  for(let i=0;i<cfg.FOOD_CLUSTERS;i++){
+    clusters.push({x:rand(0,cfg.W), y:rand(0,cfg.H)});
+  }
+  clusters.forEach(c=>{
+    for(let i=0;i<cfg.FOOD_PER_CLUSTER;i++){
+      foods.push({c, x:0, y:0});
+    }
+  });
+  respawnFood();
+}
+function respawnFood(){
+  foods.forEach(f=>{
+    const a=rand(0,Math.PI*2), r=rand(0,cfg.FOOD_RADIUS);
+    f.x = wrap(f.c.x + Math.cos(a)*r, cfg.W);
+    f.y = wrap(f.c.y + Math.sin(a)*r, cfg.H);
+  });
+}
+
+/* =========================================================
+   CREATURES (enhanced with social inputs)
+========================================================= */
+let nextId = 1;
+
+class Creature{
+  constructor(species, w=null, parents=null, generation=0){
+    this.id = nextId++;
+    this.species = species;
+
+    this.x=rand(0,cfg.W); this.y=rand(0,cfg.H);
+    this.vx=0; this.vy=0;
+    this.angle=rand(0,Math.PI*2);
+    this.omega=0;
+
+    this.energy=cfg.ENERGY_INIT;
+    this.score=0;
+
+    this.cooldown=0;
+    this.boostCD=0;
+    this.brakeCD=0;
+    this.attackCD=0;
+
+    // Social memory
+    this.nearbySame = 0;
+    this.nearbyDifferent = 0;
+    this.groupAlignment = 0;
+    this.groupCohesion = 0;
+    this.socialInputs = [0, 0, 0, 0];
+
+    // Memory signals
+    this.prevEnergy = this.energy;
+    this.prevThrust = 0;
+    this.prevTurn = 0;
+    this.timeSinceFood = 0;
+    this.prevFoodDist = 1;
+    this.prevThreatDist = 1;
+
+    this.brain=new Brain(w);
+    this.genome=this.brain.w;
+
+    // Lineage with more variation
+    if(parents){
+      const baseHue = (parents[0].hue + parents[1].hue)/2;
+      this.hue = wrapHue(baseHue + rand(-25,25)); // More variation
+      this.generation = generation;
+    }else{
+      this.hue = rand(0,360);
+      this.generation = generation;
+    }
+
+    this.age = 0;
+    this.attackCount = 0;
+    this.killCount = 0;
+  }
+
+  getDyn(){
+    if(this.species==="pred"){
+      return {
+        speedLimit: cfg.SPEED_LIMIT*1.35, // Increased from 1.25
+        accel: cfg.ACCEL*1.25, // Increased from 1.15
+        turnLimit: cfg.TURN_LIMIT*0.9,
+        turnAccel: cfg.TURN_ACCEL*1.1, // Increased turn acceleration
+        friction: 0.99, // Less friction for predators
+        energyDecayMul: 1.45,
+        moveCostMul: 1.15,
+        turnCostMul: 1.25,
+        boostMult: cfg.BOOST_MULT*1.2,
+        boostCost: cfg.BOOST_COST*1.25,
+        boostCooldown: cfg.BOOST_COOLDOWN*1.1,
+        brakeForce: cfg.BRAKE_FORCE*0.9,
+        brakeCost: cfg.BRAKE_COST*1.15,
+        brakeCooldown: cfg.BRAKE_COOLDOWN*1.1
+      };
+    }
+    return {
+      speedLimit: cfg.SPEED_LIMIT,
+      accel: cfg.ACCEL,
+      turnLimit: cfg.TURN_LIMIT,
+      turnAccel: cfg.TURN_ACCEL,
+      friction: cfg.FRICTION,
+      energyDecayMul: 1.0,
+      moveCostMul: 1.0,
+      turnCostMul: 1.0,
+      boostMult: cfg.BOOST_MULT,
+      boostCost: cfg.BOOST_COST,
+      boostCooldown: cfg.BOOST_COOLDOWN,
+      brakeForce: cfg.BRAKE_FORCE,
+      brakeCost: cfg.BRAKE_COST,
+      brakeCooldown: cfg.BRAKE_COOLDOWN
+    };
+  }
+
+  // Enhanced sensing with social inputs
+  sense(target, threat){
+    // Basic target/threat vectors
+    const tx = target ? target.x - this.x : 0;
+    const ty = target ? target.y - this.y : 0;
+    const td = Math.min(len(tx,ty), cfg.SENSE_RADIUS);
+    const tnx = td ? tx/td : 0;
+    const tny = td ? ty/td : 0;
+
+    const hx = threat ? threat.x - this.x : 0;
+    const hy = threat ? threat.y - this.y : 0;
+    const hd = Math.min(len(hx,hy), cfg.SENSE_RADIUS);
+    const hnx = hd ? hx/hd : 0;
+    const hny = hd ? hy/hd : 0;
+
+    const ca=Math.cos(this.angle), sa=Math.sin(this.angle);
+
+    const tfx = ca*tnx + sa*tny;
+    const tfy = -sa*tnx + ca*tny;
+
+    const hfx = ca*hnx + sa*hny;
+    const hfy = -sa*hnx + ca*hny;
+
+    const sp = len(this.vx,this.vy);
+
+    // Social sensing
+    this.calculateSocialInputs();
+
+    const tDistNorm = 1 - (td / cfg.SENSE_RADIUS);
+    const hDistNorm = 1 - (hd / cfg.SENSE_RADIUS);
+
+    // Memory inputs
+    const energyNorm = this.energy / cfg.ENERGY_MAX;
+    const energyDelta = (this.energy - this.prevEnergy) / cfg.ENERGY_MAX;
+    const hungerNorm = clamp(this.timeSinceFood / 8.0, 0, 1);
+
+    // Enhanced input array with social inputs
+    return [
+      // Basic inputs (0-11)
+      tfx, tfy, tDistNorm,
+      hfx, hfy, hDistNorm,
+      energyNorm,
+      sp / (this.getDyn().speedLimit || 1),
+      this.omega / (this.getDyn().turnLimit || 1),
+      Math.cos(this.angle),
+      Math.sin(this.angle),
+      this.boostCD>0?1:0,
+      
+      // Social inputs (12-15)
+      this.nearbySame / 10, // Normalized count of same species nearby
+      this.nearbyDifferent / 10, // Normalized count of other species nearby
+      this.groupAlignment, // Average heading alignment
+      this.groupCohesion, // How clustered nearby creatures are
+      
+      // Additional inputs (16-19)
+      this.brakeCD>0?1:0,
+      hungerNorm,
+      energyDelta,
+      this.prevTurn
+    ];
+  }
+
+  calculateSocialInputs() {
+    const group = this.species === 'prey' ? prey : preds;
+    let sameCount = 0;
+    let diffCount = 0;
+    let avgHeadingX = 0;
+    let avgHeadingY = 0;
+    let avgDist = 0;
+    let localCount = 0;
+    
+    for (const other of group) {
+      if (other === this) continue;
+      const d = dist(this.x, this.y, other.x, other.y);
+      if (d < cfg.SENSE_RADIUS / 2) {
+        sameCount++;
+        avgHeadingX += Math.cos(other.angle);
+        avgHeadingY += Math.sin(other.angle);
+        avgDist += d;
+        localCount++;
+      }
+    }
+    
+    // Count different species
+    const otherGroup = this.species === 'prey' ? preds : prey;
+    for (const other of otherGroup) {
+      const d = dist(this.x, this.y, other.x, other.y);
+      if (d < cfg.SENSE_RADIUS / 2) {
+        diffCount++;
+      }
+    }
+    
+    // Calculate player as threat for prey
+    if (this.species === 'prey' && player.active) {
+      const d = dist(this.x, this.y, player.x, player.y);
+      if (d < cfg.SENSE_RADIUS) {
+        diffCount += 2; // Player is a big threat
+      }
+    }
+    
+    this.nearbySame = clamp(sameCount, 0, 10);
+    this.nearbyDifferent = clamp(diffCount, 0, 10);
+    
+    if (localCount > 0) {
+      // Alignment: average heading of nearby same-species
+      avgHeadingX /= localCount;
+      avgHeadingY /= localCount;
+      const avgHeading = Math.atan2(avgHeadingY, avgHeadingX);
+      this.groupAlignment = Math.cos(this.angle - avgHeading);
+      
+      // Cohesion: inverse of average distance (closer = higher cohesion)
+      avgDist /= localCount;
+      this.groupCohesion = 1 - clamp(avgDist / (cfg.SENSE_RADIUS / 2), 0, 1);
+    } else {
+      this.groupAlignment = 0;
+      this.groupCohesion = 0;
+    }
+  }
+
+  step(target, threat){
+    const dyn = this.getDyn();
+    const inp = this.sense(target, threat);
+    const [thrust, turn, boost, brake] = this.brain.forward(inp);
+
+    this.prevThrust = thrust;
+    this.prevTurn = turn;
+
+    // Rotation
+    this.omega += turn * dyn.turnAccel * cfg.DT;
+    this.omega = clamp(this.omega, -dyn.turnLimit, dyn.turnLimit);
+    this.angle += this.omega * cfg.DT;
+
+    // Thrust + boost
+    let accel = dyn.accel;
+    if(boost > 0.6 && this.boostCD<=0 && this.energy > dyn.boostCost){
+      accel *= dyn.boostMult;
+      this.energy -= dyn.boostCost;
+      this.boostCD = dyn.boostCooldown;
+    }
+
+    const ax = Math.cos(this.angle) * thrust * accel;
+    const ay = Math.sin(this.angle) * thrust * accel;
+    this.vx += ax * cfg.DT;
+    this.vy += ay * cfg.DT;
+
+    // Brake
+    if(brake > 0.6 && this.brakeCD<=0 && this.energy > dyn.brakeCost){
+      this.vx *= dyn.brakeForce;
+      this.vy *= dyn.brakeForce;
+      this.energy -= dyn.brakeCost;
+      this.brakeCD = dyn.brakeCooldown;
+    }
+
+    // Speed limit
+    const sp = len(this.vx, this.vy);
+    if(sp > dyn.speedLimit){
+      const s = dyn.speedLimit / sp;
+      this.vx *= s; this.vy *= s;
+    }
+
+    // Integrate
+    this.x = wrap(this.x + this.vx*cfg.DT, cfg.W);
+    this.y = wrap(this.y + this.vy*cfg.DT, cfg.H);
+    this.vx *= dyn.friction;
+    this.vy *= dyn.friction;
+    this.omega *= 0.96;
+
+    // Enhanced fitness shaping for predators
+    const sp2 = len(this.vx,this.vy);
+    const forward = (Math.cos(this.angle)*(this.vx/(sp2||1)) + Math.sin(this.angle)*(this.vy/(sp2||1)));
+    
+    if (this.species === 'pred') {
+      // Predators get more reward for moving toward prey
+      if (target) {
+        const dx = target.x - this.x;
+        const dy = target.y - this.y;
+        const distToTarget = Math.hypot(dx, dy);
+        const targetAlignment = (dx * this.vx + dy * this.vy) / (distToTarget * sp2 || 1);
+        this.score += Math.max(0, targetAlignment) * 0.001;
+      }
+      this.score += Math.max(0, forward) * sp2 * 0.001; // Higher reward for predators
+    } else {
+      this.score += Math.max(0, forward) * sp2 * 0.0006;
+    }
+
+    // Energy costs
+    this.prevEnergy = this.energy;
+    this.energy -= (cfg.ENERGY_DECAY * dyn.energyDecayMul) * cfg.DT;
+    this.energy -= (cfg.ENERGY_MOVE_COST * dyn.moveCostMul) * sp2 * cfg.DT;
+    this.energy -= (cfg.ENERGY_TURN_COST * dyn.turnCostMul) * (this.omega*this.omega) * cfg.DT;
+    this.energy = clamp(this.energy, 0, cfg.ENERGY_MAX);
+
+    // Cooldowns
+    this.boostCD = Math.max(0, this.boostCD - cfg.DT);
+    this.brakeCD = Math.max(0, this.brakeCD - cfg.DT);
+    this.cooldown = Math.max(0, this.cooldown - cfg.DT);
+    this.attackCD = Math.max(0, this.attackCD - cfg.DT);
+
+    this.age += cfg.DT;
+    this.timeSinceFood += cfg.DT;
+
+    if(target){
+      const td = Math.min(len(target.x-this.x, target.y-this.y), cfg.SENSE_RADIUS);
+      this.prevFoodDist = 1 - (td / cfg.SENSE_RADIUS);
+    } else this.prevFoodDist = 0;
+
+    if(threat){
+      const hd = Math.min(len(threat.x-this.x, threat.y-this.y), cfg.SENSE_RADIUS);
+      this.prevThreatDist = 1 - (hd / cfg.SENSE_RADIUS);
+    } else this.prevThreatDist = 0;
+  }
+
+  tryEatPellet(){
+    for(const f of foods){
+      if(len(f.x-this.x, f.y-this.y) < cfg.EAT_RADIUS){
+        if(this.species==="prey"){
+          this.energy = clamp(this.energy + cfg.FOOD_ENERGY, 0, cfg.ENERGY_MAX);
+          this.score += 2;
+          this.timeSinceFood = 0;
+        }else{
+          this.energy = clamp(this.energy + cfg.PREDATOR_FOOD_ENERGY, 0, cfg.ENERGY_MAX);
+          this.score -= cfg.PREDATOR_FOOD_PENALTY;
+          this.timeSinceFood += 0.5;
+        }
+        f.x = rand(0,cfg.W);
+        f.y = rand(0,cfg.H);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  tryAttack(preyList){
+    if(this.species!=="pred") return false;
+    if (this.attackCD > 0) return false;
+
+    let best=null, bd=1e9;
+    for(const p of preyList){
+      const d2 = (p.x-this.x)*(p.x-this.x) + (p.y-this.y)*(p.y-this.y);
+      if(d2 < bd){ bd=d2; best=p; }
+    }
+    if(!best) return false;
+
+    const d = Math.sqrt(bd);
+    if(d < cfg.ATTACK_RADIUS){
+      const dx = best.x - this.x, dy = best.y - this.y;
+      const dist = d || 1;
+      const nx = dx/dist, ny = dy/dist;
+      const facing = (Math.cos(this.angle)*nx + Math.sin(this.angle)*ny);
+      const hitFactor = clamp((facing+0.2)/1.2, 0, 1);
+
+      const drain = cfg.ATTACK_DRAIN * hitFactor * cfg.DT * 60;
+      const gain  = cfg.ATTACK_GAIN  * hitFactor * cfg.DT * 60;
+
+      if(drain > 0.01){
+        best.energy = clamp(best.energy - drain, 0, cfg.ENERGY_MAX);
+        this.energy = clamp(this.energy + gain, 0, cfg.ENERGY_MAX);
+        this.score += 3.5 * hitFactor; // Increased from 2.5
+        this.timeSinceFood = 0;
+        this.attackCount++;
+        this.attackCD = cfg.ATTACK_COOLDOWN;
+        
+        if (best.energy <= 0) {
+          this.killCount++;
+          createParticles(best.x, best.y, 8, '#ff5555');
+        }
+        
+        return true;
+      }
+    }
+    return false;
+  }
+
+  canReproduce(){
+    return this.energy > cfg.REPRO_THRESHOLD && this.cooldown<=0;
+  }
+
+  draw(rankInSpecies, absNorm, isTop3Global){
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+
+    // Get color based on player's color mode
+    let fillColor;
+    switch(player.colorMode) {
+      case 0: // Normal (lineage)
+        fillColor = `hsl(${this.hue},70%,50%)`;
+        break;
+      case 1: // Energy
+        const energyNorm = this.energy / cfg.ENERGY_MAX;
+        fillColor = `hsl(${120 * energyNorm},70%,50%)`;
+        break;
+      case 2: // Age
+        const ageNorm = clamp(this.age / 30, 0, 1);
+        fillColor = `hsl(${240 - ageNorm * 120},70%,50%)`;
+        break;
+      case 3: // Fitness
+        const fitNorm = clamp(this.score / Math.max(bestFitnessEverPrey, bestFitnessEverPred, 1), 0, 1);
+        fillColor = `hsl(${fitNorm * 120},70%,50%)`;
+        break;
+    }
+
+    ctx.fillStyle = fillColor;
+
+    if(this.species==="prey"){
+      ctx.beginPath();
+      ctx.moveTo(8,0);
+      ctx.lineTo(-6,4);
+      ctx.lineTo(-6,-4);
+      ctx.closePath();
+      ctx.fill();
+    }else{
+      ctx.beginPath();
+      ctx.moveTo(9,0);
+      ctx.lineTo(0,6);
+      ctx.lineTo(-7,0);
+      ctx.lineTo(0,-6);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Top 3 global outlines
+    if(isTop3Global){
+      ctx.lineWidth = (isTop3Global===1)?3:2;
+      ctx.strokeStyle = (isTop3Global===1)?"#ffd700":(isTop3Global===2)?"#ccc":"#cd7f32";
+      ctx.stroke();
+    }
+
+    ctx.restore();
+
+    // Label
+    ctx.fillStyle="#fff";
+    ctx.font="10px system-ui";
+    ctx.textAlign="center";
+    const tag = this.species==="pred" ? "P" : "p";
+    ctx.fillText(`${tag}${rankInSpecies}`, this.x, this.y-12);
+  }
+}
+
+function wrapHue(h){
+  h%=360; if(h<0) h+=360;
+  return h;
+}
+
+/* =========================================================
+   WORLD STATE
+========================================================= */
+let prey=[], preds=[];
+let graphManager, visionVisualizer, geneticVisualizer;
+
+function init(){
+  initFood();
+  prey = Array.from({length:cfg.PREY_INIT}, ()=> new Creature("prey", null, null, 0));
+  preds = Array.from({length:cfg.PRED_INIT}, ()=> new Creature("pred", null, null, 0));
+  
+  // Initialize systems
+  graphManager = new GraphManager();
+  visionVisualizer = new VisionVisualizer();
+  geneticVisualizer = new GeneticVisualizer();
+}
+init();
+
+/* =========================================================
+   TARGET SELECTION
+========================================================= */
+function nearestFood(c){
+  let best=null, bd=1e9;
+  for(const f of foods){
+    const d2=(f.x-c.x)*(f.x-c.x)+(f.y-c.y)*(f.y-c.y);
+    if(d2<bd){ bd=d2; best=f; }
+  }
+  return best;
+}
+function nearestPredator(preyCreature){
+  let best=null, bd=1e9;
+  // Include player as predator if active
+  if (player.active) {
+    const d2 = (player.x-preyCreature.x)*(player.x-preyCreature.x)+(player.y-preyCreature.y)*(player.y-preyCreature.y);
+    if (d2 < bd) {
+      bd = d2;
+      best = player;
+    }
+  }
+  for(const p of preds){
+    const d2=(p.x-preyCreature.x)*(p.x-preyCreature.x)+(p.y-preyCreature.y)*(p.y-preyCreature.y);
+    if(d2<bd){ bd=d2; best=p; }
+  }
+  return best;
+}
+function nearestPrey(predCreature){
+  let best=null, bd=1e9;
+  for(const p of prey){
+    const d2=(p.x-predCreature.x)*(p.x-predCreature.x)+(p.y-predCreature.y)*(p.y-predCreature.y);
+    if(d2<bd){ bd=d2; best=p; }
+  }
+  return best;
+}
+
+/* =========================================================
+   REPRODUCTION
+========================================================= */
+function reproduceGroup(group, species){
+  const eligible = group.filter(c=>c.canReproduce()).sort((a,b)=>b.score-a.score);
+  for(let i=0;i<eligible.length-1;i+=2){
+    const a=eligible[i], b=eligible[i+1];
+    const childW = Brain.mutate(Brain.crossover(a.genome, b.genome));
+    const childGen = Math.max(a.generation, b.generation) + 1;
+    const child = new Creature(species, childW, [a,b], childGen);
+    child.x = a.x; child.y = a.y;
+
+    a.energy -= cfg.REPRO_COST;
+    b.energy -= cfg.REPRO_COST;
+    a.cooldown = cfg.REPRO_COOLDOWN;
+    b.cooldown = cfg.REPRO_COOLDOWN;
+
+    group.push(child);
+  }
+}
+
+function cullToMax(group, maxCount){
+  if(group.length<=maxCount) return;
+  group.sort((a,b)=>a.score-b.score);
+  while(group.length>maxCount){
+    group.shift();
+  }
+}
+function boostToMin(group, minCount, species){
+  if(group.length>=minCount) return;
+  group.sort((a,b)=>b.score-a.score);
+  const best = group[0];
+  while(group.length<minCount){
+    const childW = Brain.mutate(best.genome);
+    const child = new Creature(species, childW, [best,best], best.generation+1);
+    child.x = rand(0,cfg.W); child.y = rand(0,cfg.H);
+    group.push(child);
+  }
+}
+
+/* =========================================================
+   TICK
+========================================================= */
+let totalAttacks = 0;
+let totalKills = 0;
+let prevAvgPreyFitness = 0;
+let prevAvgPredFitness = 0;
+
+function tick(){
+  const dt = cfg.DT;
+  
+  // Update player
+  player.update(dt);
+  
+  // Update particles
+  updateParticles(dt);
+
+  // Step prey (target food, threat predator or player)
+  for(const c of prey){
+    const food = nearestFood(c);
+    const threat = nearestPredator(c);
+    c.step(food, threat);
+    c.tryEatPellet();
+  }
+
+  // Step predators
+  let attacksThisFrame = 0;
+  for(const p of preds){
+    const target = nearestPrey(p);
+    const avoidFood = nearestFood(p);
+    p.step(target ? {x:target.x,y:target.y} : null, avoidFood);
+    if (p.tryAttack(prey)) {
+      attacksThisFrame++;
+    }
+    p.tryEatPellet();
+  }
+  
+  totalAttacks += attacksThisFrame;
+
+  // Death by energy depletion
+  const deadPrey = prey.filter(c=>c.energy<=0);
+  const deadPreds = preds.filter(c=>c.energy<=0);
+  
+  totalKills += deadPrey.length;
+  
+  prey = prey.filter(c=>c.energy>0);
+  preds = preds.filter(c=>c.energy>0);
+
+  // Reproduction
+  reproduceGroup(prey, "prey");
+  reproduceGroup(preds, "pred");
+
+  // Population regulation
+  cullToMax(prey, cfg.PREY_MAX);
+  cullToMax(preds, cfg.PRED_MAX);
+  boostToMin(prey, cfg.PREY_MIN, "prey");
+  boostToMin(preds, cfg.PRED_MIN, "pred");
+
+  // Render
+  ctx.clearRect(0,0,cfg.W,cfg.H);
+
+  // Food
+  for(const f of foods){
+    ctx.fillStyle="#6f6";
+    ctx.beginPath();
+    ctx.arc(f.x,f.y,3,0,Math.PI*2);
+    ctx.fill();
+  }
+
+  // Particles
+  drawParticles();
+
+  // Combine for global top 3
+  const all = prey.concat(preds);
+  all.sort((a,b)=>b.score-a.score);
+
+  // Track best ever
+  let bestPreyAlive = 0;
+  for(const c of prey) bestPreyAlive = Math.max(bestPreyAlive, c.score);
+  let bestPredAlive = 0;
+  for(const c of preds) bestPredAlive = Math.max(bestPredAlive, c.score);
+
+  bestFitnessEverPrey = Math.max(bestFitnessEverPrey, bestPreyAlive);
+  bestFitnessEverPred = Math.max(bestFitnessEverPred, bestPredAlive);
+
+  // Rank within species
+  const preySorted = prey.slice().sort((a,b)=>b.score-a.score);
+  const predSorted = preds.slice().sort((a,b)=>b.score-a.score);
+
+  // Draw creatures
+  for(let i=0;i<preySorted.length;i++){
+    const c = preySorted[i];
+    const absNorm = clamp(c.score / (bestFitnessEverPrey || 1), 0, 1);
+    const topIdx = globalTopIndex(all, c);
+    c.draw(i+1, absNorm, topIdx);
+  }
+
+  for(let i=0;i<predSorted.length;i++){
+    const p = predSorted[i];
+    const absNorm = clamp(p.score / (bestFitnessEverPred || 1), 0, 1);
+    const topIdx = globalTopIndex(all, p);
+    p.draw(i+1, absNorm, topIdx);
+  }
+
+  // Draw player
+  player.draw();
+
+  // Update visualizations
+  visionVisualizer.update(dt, preySorted.slice(0, 3), predSorted.slice(0, 2));
+  geneticVisualizer.drawGeneticSpace();
+  geneticVisualizer.updateStats();
+
+  // Update graphs
+  const avgPreyFitness = prey.length ? (prey.reduce((s,c)=>s+c.score,0)/prey.length) : 0;
+  const avgPredFitness = preds.length ? (preds.reduce((s,c)=>s+c.score,0)/preds.length) : 0;
+  const avgAge = all.length ? (all.reduce((s,c)=>s+c.age,0)/all.length) : 0;
+  const avgGeneration = all.length ? (all.reduce((s,c)=>s+c.generation,0)/all.length) : 0;
+  
+  const preyDiversity = GeneticAnalyzer.calculateDiversity(prey);
+  const predDiversity = GeneticAnalyzer.calculateDiversity(preds);
+  
+  const evolutionRatePrey = GeneticAnalyzer.calculateEvolutionRate(prey, prevAvgPreyFitness);
+  const evolutionRatePred = GeneticAnalyzer.calculateEvolutionRate(preds, prevAvgPredFitness);
+  
+  prevAvgPreyFitness = avgPreyFitness;
+  prevAvgPredFitness = avgPredFitness;
+  
+  graphManager.update({
+    preyPopulation: prey.length,
+    predPopulation: preds.length,
+    preyAvgFitness: avgPreyFitness,
+    predAvgFitness: avgPredFitness,
+    preyBestFitness: bestPreyAlive,
+    predBestFitness: bestPredAlive,
+    geneticDiversityPrey: preyDiversity,
+    geneticDiversityPred: predDiversity,
+    avgAge: avgAge,
+    avgGeneration: avgGeneration,
+    attacks: totalAttacks,
+    kills: totalKills
+  });
+
+  // HUD
+  const oldestPreyGen = prey.length ? Math.max(...prey.map(c=>c.generation)) : 0;
+  const oldestPredGen = preds.length ? Math.max(...preds.map(c=>c.generation)) : 0;
+  const oldestAge = all.length ? Math.max(...all.map(c=>c.age)) : 0;
+  const totalAttacksByPreds = preds.reduce((sum, p) => sum + p.attackCount, 0);
+  const totalKillsByPreds = preds.reduce((sum, p) => sum + p.killCount, 0);
+
+  hud.innerHTML =
+    `<div style="color: #8cf; font-weight: bold;">Enhanced Neuroevolution Sandbox</div>`+
+    `<div style="margin-top: 5px;">Prey: ${prey.length} | Predators: ${preds.length} | Total: ${all.length}</div>`+
+    `<div>Best prey: ${bestPreyAlive.toFixed(1)} (ever: ${bestFitnessEverPrey.toFixed(1)})</div>`+
+    `<div>Best pred: ${bestPredAlive.toFixed(1)} (ever: ${bestFitnessEverPred.toFixed(1)})</div>`+
+    `<div>Avg prey fit: ${avgPreyFitness.toFixed(2)} | Avg pred fit: ${avgPredFitness.toFixed(2)}</div>`+
+    `<div>Max gen (prey/pred): ${oldestPreyGen}/${oldestPredGen} | Oldest age: ${oldestAge.toFixed(1)}s</div>`+
+    `<div>Predator success: ${totalKillsByPreds} kills (${totalAttacksByPreds} attacks)</div>`+
+    `<div style="font-size: 11px; color: #aaa; margin-top: 5px;">Player: ${player.active ? 'ACTIVE' : 'INACTIVE'} | Color Mode: ${['Lineage', 'Energy', 'Age', 'Fitness'][player.colorMode]}</div>`;
+
+  requestAnimationFrame(tick);
+}
+
+function globalTopIndex(sortedAll, creature){
+  for(let i=0;i<3 && i<sortedAll.length;i++){
+    if(sortedAll[i]===creature) return i+1;
+  }
+  return 0;
+}
+
+// Start simulation
+tick();
+
+})();
+</script>
+</body>
+</html>

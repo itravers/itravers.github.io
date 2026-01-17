@@ -1,0 +1,775 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Neuro Evolution Sandbox (Prey vs Predator)</title>
+<style>
+  html, body { margin:0; padding:0; background:#111; overflow:hidden; }
+  canvas { display:block; }
+  #hud{
+    position:fixed; left:10px; top:10px;
+    color:#ddd; font-family:system-ui, sans-serif; font-size:13px;
+    background:rgba(0,0,0,0.45); padding:10px; border-radius:10px;
+    line-height: 1.35;
+    max-width: 520px;
+  }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<canvas id="c"></canvas>
+
+<script>
+(() => {
+/* =========================================================
+   CONFIG (keeps current feel, plus predators)
+========================================================= */
+const cfg = {
+  W: innerWidth,
+  H: innerHeight,
+
+  // Prey pop
+  PREY_INIT: 40,
+  PREY_MIN: 30,
+  PREY_MAX: 80,
+
+  // Predator pop (significantly less)
+  PRED_INIT: 4,
+  PRED_MIN: 3,
+  PRED_MAX: 10,
+
+  // Food (clustered)
+  FOOD_CLUSTERS: 6,
+  FOOD_PER_CLUSTER: 9,
+  FOOD_RADIUS: 90,
+  FOOD_ENERGY: 26,
+
+  DT: 1/60,
+
+  // Base movement (already slowed vs earlier fast version)
+  SPEED_LIMIT: 80,
+  ACCEL: 110,
+  TURN_LIMIT: 4.5,
+  TURN_ACCEL: 6.5,
+  FRICTION: 0.985,
+
+  // Boost and brake (kept)
+  BOOST_MULT: 3.0,
+  BOOST_COST: 18,
+  BOOST_COOLDOWN: 2.5,
+
+  BRAKE_FORCE: 0.7,
+  BRAKE_COST: 6,
+  BRAKE_COOLDOWN: 1.5,
+
+  // Energy model (kept)
+  ENERGY_INIT: 70,
+  ENERGY_MAX: 160,
+  ENERGY_DECAY: 2.2,
+  ENERGY_MOVE_COST: 0.012,
+  ENERGY_TURN_COST: 0.35,
+
+  // Repro (kept style)
+  REPRO_THRESHOLD: 120,
+  REPRO_COST: 55,
+  REPRO_COOLDOWN: 3.0,
+
+  // Evolution
+  MUT_RATE: 0.12,
+  MUT_SCALE: 0.4,
+  WEIGHT_CLAMP: 3.0,
+
+  // Sensing and collision
+  SENSE_RADIUS: 240,
+  EAT_RADIUS: 8,
+
+  // Prey vs predator interaction
+  ATTACK_RADIUS: 10,
+  ATTACK_DRAIN: 22,          // how much energy prey loses per successful attack tick
+  ATTACK_GAIN: 18,           // how much predator gains per successful attack tick
+  PREDATOR_FOOD_PENALTY: 3,  // predator score penalty when eating prey food
+  PREDATOR_FOOD_ENERGY: -8,  // predator energy change when eating prey food (discourage)
+
+  // NN: more advanced (recurrent + memory inputs)
+  // Base sensory features are still similar, but we add memory inputs + a recurrent unit.
+  N_IN: 16,      // was 12; now adds memory
+  N_H: 12,
+  N_OUT: 4       // thrust, turn, boost, brake
+};
+
+/* =========================================================
+   CANVAS
+========================================================= */
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const hud = document.getElementById("hud");
+
+function resize(){
+  canvas.width = cfg.W = innerWidth;
+  canvas.height = cfg.H = innerHeight;
+}
+addEventListener("resize", resize);
+resize();
+
+/* =========================================================
+   GLOBAL FITNESS TRACKING (no regression: best ever is absolute)
+========================================================= */
+let bestFitnessEverPrey = 0;
+let bestFitnessEverPred = 0;
+
+/* =========================================================
+   UTIL
+========================================================= */
+const rand=(a=0,b=1)=>a+Math.random()*(b-a);
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const len=(x,y)=>Math.hypot(x,y);
+const wrap=(x,m)=>x<0?x+m:(x>=m?x-m:x);
+const tanh=Math.tanh;
+const sigmoid=x=>1/(1+Math.exp(-x));
+
+/* =========================================================
+   BRAIN (same brain for both species, now with:
+   - 16 inputs (adds memory)
+   - 12 hidden tanh
+   - 1 recurrent neuron feeding into output layer
+========================================================= */
+class Brain{
+  constructor(w=null){
+    this.w = w ? w.slice() : Array.from({length:this.count()},()=>rand(-1,1));
+    this.r = 0; // recurrent state
+  }
+
+  // Weight layout:
+  // Hidden: N_H * (N_IN + 1 bias)
+  // Recurrent unit: (N_IN + 1 bias + 1 self)  -> tanh( sum(inp*wi) + bias + r*w_self )
+  // Output: N_OUT * ((N_H + 1 recurrent) + 1 bias)
+  count(){
+    const hidden = cfg.N_H*(cfg.N_IN+1);
+    const rec = (cfg.N_IN + 1 + 1);
+    const out = cfg.N_OUT*((cfg.N_H + 1)+1);
+    return hidden + rec + out;
+  }
+
+  forward(inp){
+    let i=0;
+
+    // Hidden layer
+    const h = new Array(cfg.N_H);
+    for(let n=0;n<cfg.N_H;n++){
+      let s=0;
+      for(let k=0;k<cfg.N_IN;k++) s += this.w[i++]*inp[k];
+      s += this.w[i++]; // bias
+      h[n] = tanh(s);
+    }
+
+    // Recurrent neuron (one unit)
+    let rs=0;
+    for(let k=0;k<cfg.N_IN;k++) rs += this.w[i++]*inp[k];
+    rs += this.w[i++];        // bias
+    const wSelf = this.w[i++];// self weight
+    rs += this.r * wSelf;
+    this.r = tanh(rs);
+
+    // Output layer: features = hidden + recurrent
+    const outRaw = new Array(cfg.N_OUT);
+    for(let o=0;o<cfg.N_OUT;o++){
+      let s=0;
+      for(let k=0;k<cfg.N_H;k++) s += this.w[i++]*h[k];
+      s += this.w[i++]*this.r; // recurrent feature weight
+      s += this.w[i++];        // bias
+      outRaw[o]=s;
+    }
+
+    // same semantics as before
+    return [
+      sigmoid(outRaw[0]), // thrust 0..1
+      tanh(outRaw[1]),    // turn -1..1
+      sigmoid(outRaw[2]), // boost 0..1 (thresholded)
+      sigmoid(outRaw[3])  // brake 0..1 (thresholded)
+    ];
+  }
+
+  static crossover(a,b){
+    const p=Math.floor(rand(1,a.length-1));
+    return a.map((v,i)=>i<p?v:b[i]);
+  }
+
+  static mutate(w){
+    return w.map(v=>{
+      if(Math.random()<cfg.MUT_RATE){
+        v += rand(-1,1)*cfg.MUT_SCALE;
+        v = clamp(v, -cfg.WEIGHT_CLAMP, cfg.WEIGHT_CLAMP);
+      }
+      return v;
+    });
+  }
+}
+
+/* =========================================================
+   FOOD (clustered) - unchanged behavior
+========================================================= */
+const clusters=[], foods=[];
+function initFood(){
+  clusters.length=foods.length=0;
+  for(let i=0;i<cfg.FOOD_CLUSTERS;i++){
+    clusters.push({x:rand(0,cfg.W), y:rand(0,cfg.H)});
+  }
+  clusters.forEach(c=>{
+    for(let i=0;i<cfg.FOOD_PER_CLUSTER;i++){
+      foods.push({c, x:0, y:0});
+    }
+  });
+  respawnFood();
+}
+function respawnFood(){
+  foods.forEach(f=>{
+    const a=rand(0,Math.PI*2), r=rand(0,cfg.FOOD_RADIUS);
+    f.x = wrap(f.c.x + Math.cos(a)*r, cfg.W);
+    f.y = wrap(f.c.y + Math.sin(a)*r, cfg.H);
+  });
+}
+
+/* =========================================================
+   CREATURES
+   - Two species: "prey" and "pred"
+   - Different shapes and dynamics
+   - Same neural network class
+========================================================= */
+let nextId = 1;
+
+class Creature{
+  constructor(species, w=null, parents=null, generation=0){
+    this.id = nextId++;
+    this.species = species; // "prey" | "pred"
+
+    this.x=rand(0,cfg.W); this.y=rand(0,cfg.H);
+    this.vx=0; this.vy=0;
+    this.angle=rand(0,Math.PI*2);
+    this.omega=0;
+
+    this.energy=cfg.ENERGY_INIT;
+    this.score=0;
+
+    this.cooldown=0;
+    this.boostCD=0;
+    this.brakeCD=0;
+
+    // memory signals
+    this.prevEnergy = this.energy;
+    this.prevThrust = 0;
+    this.prevTurn = 0;
+    this.timeSinceFood = 0;     // seconds since last pellet eaten (prey), or since last "meal" (pred)
+    this.prevFoodDist = 1;      // normalized previous target distance
+    this.prevThreatDist = 1;    // normalized previous threat distance
+
+    this.brain=new Brain(w);
+    this.genome=this.brain.w;
+
+    // lineage visuals (kept) but prevent full collapse by adding small hue mutation on birth
+    if(parents){
+      const baseHue = (parents[0].hue + parents[1].hue)/2;
+      this.hue = wrapHue(baseHue + rand(-18,18));
+      this.generation = generation;
+    }else{
+      this.hue = rand(0,360);
+      this.generation = generation;
+    }
+
+    // age tracking (requested)
+    this.age = 0; // seconds alive
+  }
+
+  // Species-specific dynamics (different feel, same brain)
+  getDyn(){
+    if(this.species==="pred"){
+      return {
+        speedLimit: cfg.SPEED_LIMIT*2,
+        accel: cfg.ACCEL*1.15,
+        turnLimit: cfg.TURN_LIMIT*0.95,
+        turnAccel: cfg.TURN_ACCEL*0.9,
+        friction: 0.987,               // slightly less damping -> more glide
+        energyDecayMul: 1.45,          // predators burn more energy
+        moveCostMul: 1.15,
+        turnCostMul: 1.25,
+        boostMult: cfg.BOOST_MULT*1.1,
+        boostCost: cfg.BOOST_COST*1.25,
+        boostCooldown: cfg.BOOST_COOLDOWN*1.25,
+        brakeForce: cfg.BRAKE_FORCE*0.9,
+        brakeCost: cfg.BRAKE_COST*1.15,
+        brakeCooldown: cfg.BRAKE_COOLDOWN*1.1
+      };
+    }
+    // prey
+    return {
+      speedLimit: cfg.SPEED_LIMIT,
+      accel: cfg.ACCEL,
+      turnLimit: cfg.TURN_LIMIT,
+      turnAccel: cfg.TURN_ACCEL,
+      friction: cfg.FRICTION,
+      energyDecayMul: 1.0,
+      moveCostMul: 1.0,
+      turnCostMul: 1.0,
+      boostMult: cfg.BOOST_MULT,
+      boostCost: cfg.BOOST_COST,
+      boostCooldown: cfg.BOOST_COOLDOWN,
+      brakeForce: cfg.BRAKE_FORCE,
+      brakeCost: cfg.BRAKE_COST,
+      brakeCooldown: cfg.BRAKE_COOLDOWN
+    };
+  }
+
+  // Sensing:
+  // Prey: target = nearest food, threat = nearest predator
+  // Pred: target = nearest prey,  threat = (optional) nearest food as an "avoid" cue
+  sense(target, threat){
+    // target vector in creature frame
+    const tx = target ? target.x - this.x : 0;
+    const ty = target ? target.y - this.y : 0;
+    const td = Math.min(len(tx,ty), cfg.SENSE_RADIUS);
+    const tnx = td ? tx/td : 0;
+    const tny = td ? ty/td : 0;
+
+    // threat vector in creature frame
+    const hx = threat ? threat.x - this.x : 0;
+    const hy = threat ? threat.y - this.y : 0;
+    const hd = Math.min(len(hx,hy), cfg.SENSE_RADIUS);
+    const hnx = hd ? hx/hd : 0;
+    const hny = hd ? hy/hd : 0;
+
+    const ca=Math.cos(this.angle), sa=Math.sin(this.angle);
+
+    const tfx = ca*tnx + sa*tny;
+    const tfy = -sa*tnx + ca*tny;
+
+    const hfx = ca*hnx + sa*hny;
+    const hfy = -sa*hnx + ca*hny;
+
+    const sp = len(this.vx,this.vy);
+
+    // normalized distances
+    const tDistNorm = 1 - (td / cfg.SENSE_RADIUS);
+    const hDistNorm = 1 - (hd / cfg.SENSE_RADIUS);
+
+    // memory inputs
+    const energyNorm = this.energy / cfg.ENERGY_MAX;
+    const energyDelta = (this.energy - this.prevEnergy) / cfg.ENERGY_MAX; // -1..1-ish small
+    const hungerNorm = clamp(this.timeSinceFood / 8.0, 0, 1); // saturates after ~8s
+    const prevFood = clamp(this.prevFoodDist, 0, 1);
+    const prevThreat = clamp(this.prevThreatDist, 0, 1);
+
+    // Keep structure similar to old 12 inputs, add 4 memory inputs (now 16 total)
+    // 0-2: target direction + closeness
+    // 3-5: threat direction + closeness
+    // 6-8: energy, speed, spin
+    // 9-10: orientation cos/sin
+    // 11-12: cooldown flags
+    // 13-15: memory inputs
+    return [
+      tfx, tfy, tDistNorm,
+      hfx, hfy, hDistNorm,
+      energyNorm,
+      sp / (this.getDyn().speedLimit || 1),
+      this.omega / (this.getDyn().turnLimit || 1),
+      Math.cos(this.angle),
+      Math.sin(this.angle),
+      this.boostCD>0?1:0,
+      this.brakeCD>0?1:0,
+      hungerNorm,
+      energyDelta,
+      // previous actions help damp oscillation
+      this.prevTurn
+    ];
+  }
+
+  step(target, threat){
+    const dyn = this.getDyn();
+    const inp = this.sense(target, threat);
+    const [thrust, turn, boost, brake] = this.brain.forward(inp);
+
+    // store prev actions as memory for next tick
+    this.prevThrust = thrust;
+    this.prevTurn = turn;
+
+    // rotation
+    this.omega += turn * dyn.turnAccel * cfg.DT;
+    this.omega = clamp(this.omega, -dyn.turnLimit, dyn.turnLimit);
+    this.angle += this.omega * cfg.DT;
+
+    // thrust + boost
+    let accel = dyn.accel;
+    if(boost > 0.6 && this.boostCD<=0 && this.energy > dyn.boostCost){
+      accel *= dyn.boostMult;
+      this.energy -= dyn.boostCost;
+      this.boostCD = dyn.boostCooldown;
+    }
+
+    const ax = Math.cos(this.angle) * thrust * accel;
+    const ay = Math.sin(this.angle) * thrust * accel;
+    this.vx += ax * cfg.DT;
+    this.vy += ay * cfg.DT;
+
+    // brake
+    if(brake > 0.6 && this.brakeCD<=0 && this.energy > dyn.brakeCost){
+      this.vx *= dyn.brakeForce;
+      this.vy *= dyn.brakeForce;
+      this.energy -= dyn.brakeCost;
+      this.brakeCD = dyn.brakeCooldown;
+    }
+
+    // speed limit
+    const sp = len(this.vx, this.vy);
+    if(sp > dyn.speedLimit){
+      const s = dyn.speedLimit / sp;
+      this.vx *= s; this.vy *= s;
+    }
+
+    // integrate
+    this.x = wrap(this.x + this.vx*cfg.DT, cfg.W);
+    this.y = wrap(this.y + this.vy*cfg.DT, cfg.H);
+    this.vx *= dyn.friction;
+    this.vy *= dyn.friction;
+    this.omega *= 0.96;
+
+    // fitness shaping (kept concept): reward forward-efficient motion (helps fight pure spinning)
+    const sp2 = len(this.vx,this.vy);
+    const forward = (Math.cos(this.angle)*(this.vx/(sp2||1)) + Math.sin(this.angle)*(this.vy/(sp2||1)));
+    this.score += Math.max(0, forward) * sp2 * 0.0006;
+
+    // energy costs (species-specific multipliers)
+    this.prevEnergy = this.energy;
+    this.energy -= (cfg.ENERGY_DECAY * dyn.energyDecayMul) * cfg.DT;
+    this.energy -= (cfg.ENERGY_MOVE_COST * dyn.moveCostMul) * sp2 * cfg.DT;
+    this.energy -= (cfg.ENERGY_TURN_COST * dyn.turnCostMul) * (this.omega*this.omega) * cfg.DT;
+    this.energy = clamp(this.energy, 0, cfg.ENERGY_MAX);
+
+    // cooldowns, age, hunger clock
+    this.boostCD = Math.max(0, this.boostCD - cfg.DT);
+    this.brakeCD = Math.max(0, this.brakeCD - cfg.DT);
+    this.cooldown = Math.max(0, this.cooldown - cfg.DT);
+
+    this.age += cfg.DT;
+    this.timeSinceFood += cfg.DT;
+
+    // keep normalized memory distances up to date (target/threat)
+    if(target){
+      const td = Math.min(len(target.x-this.x, target.y-this.y), cfg.SENSE_RADIUS);
+      this.prevFoodDist = 1 - (td / cfg.SENSE_RADIUS);
+    } else this.prevFoodDist = 0;
+
+    if(threat){
+      const hd = Math.min(len(threat.x-this.x, threat.y-this.y), cfg.SENSE_RADIUS);
+      this.prevThreatDist = 1 - (hd / cfg.SENSE_RADIUS);
+    } else this.prevThreatDist = 0;
+  }
+
+  tryEatPellet(){
+    // Both species can collide with pellets, but predators are discouraged from doing so
+    for(const f of foods){
+      if(len(f.x-this.x, f.y-this.y) < cfg.EAT_RADIUS){
+        if(this.species==="prey"){
+          this.energy = clamp(this.energy + cfg.FOOD_ENERGY, 0, cfg.ENERGY_MAX);
+          this.score += 2;
+          this.timeSinceFood = 0;
+        }else{
+          // predator penalty: "avoid prey food"
+          this.energy = clamp(this.energy + cfg.PREDATOR_FOOD_ENERGY, 0, cfg.ENERGY_MAX);
+          this.score -= cfg.PREDATOR_FOOD_PENALTY;
+          // (do not reset hunger much; they didn't really eat)
+          this.timeSinceFood += 0.5;
+        }
+        // respawn pellet
+        f.x = rand(0,cfg.W);
+        f.y = rand(0,cfg.H);
+      }
+    }
+  }
+
+  tryAttack(preyList){
+    if(this.species!=="pred") return;
+
+    // Attack nearest prey in radius; drain prey energy and gain predator energy + fitness
+    let best=null, bd=1e9;
+    for(const p of preyList){
+      const d2 = (p.x-this.x)*(p.x-this.x) + (p.y-this.y)*(p.y-this.y);
+      if(d2 < bd){ bd=d2; best=p; }
+    }
+    if(!best) return;
+
+    const d = Math.sqrt(bd);
+    if(d < cfg.ATTACK_RADIUS){
+      // optional: alignment helps avoid "camping kills"
+      const dx = best.x - this.x, dy = best.y - this.y;
+      const dist = d || 1;
+      const nx = dx/dist, ny = dy/dist;
+      const facing = (Math.cos(this.angle)*nx + Math.sin(this.angle)*ny); // -1..1
+      const hitFactor = clamp((facing+0.2)/1.2, 0, 1); // needs somewhat facing prey
+
+      const drain = cfg.ATTACK_DRAIN * hitFactor * cfg.DT * 60; // scaled to per-second-ish
+      const gain  = cfg.ATTACK_GAIN  * hitFactor * cfg.DT * 60;
+
+      if(drain > 0.01){
+        best.energy = clamp(best.energy - drain, 0, cfg.ENERGY_MAX);
+        this.energy = clamp(this.energy + gain, 0, cfg.ENERGY_MAX);
+        this.score += 2.5 * hitFactor;
+        this.timeSinceFood = 0; // predator "ate" (energy transfer)
+      }
+    }
+  }
+
+  canReproduce(){
+    // unchanged rule style (energy surplus + cooldown)
+    return this.energy > cfg.REPRO_THRESHOLD && this.cooldown<=0;
+  }
+
+  draw(rankInSpecies, absNorm, isTop3Global){
+    // species shape
+    ctx.save();
+    ctx.translate(this.x,this.y);
+    ctx.rotate(this.angle);
+
+    const fill = `hsl(${this.hue},70%,50%)`;
+    ctx.fillStyle = fill;
+
+    if(this.species==="prey"){
+      // triangle (same as before)
+      ctx.beginPath();
+      ctx.moveTo(8,0);
+      ctx.lineTo(-6,4);
+      ctx.lineTo(-6,-4);
+      ctx.closePath();
+      ctx.fill();
+    }else{
+      // predator: diamond / arrowhead hybrid
+      ctx.beginPath();
+      ctx.moveTo(9,0);
+      ctx.lineTo(0,6);
+      ctx.lineTo(-7,0);
+      ctx.lineTo(0,-6);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Top 3 global outlines (kept) — by overall score across all creatures
+    if(isTop3Global){
+      ctx.lineWidth = (isTop3Global===1)?3:2;
+      ctx.strokeStyle = (isTop3Global===1)?"#ffd700":(isTop3Global===2)?"#ccc":"#cd7f32";
+      ctx.stroke();
+    }
+
+    ctx.restore();
+
+    // label: rank within species and absolute normalized fitness
+    ctx.fillStyle="#fff";
+    ctx.font="10px system-ui";
+    ctx.textAlign="center";
+    const tag = this.species==="pred" ? "P" : "p";
+    ctx.fillText(`${tag}${rankInSpecies} (${absNorm.toFixed(2)})`, this.x, this.y-12);
+  }
+}
+
+function wrapHue(h){
+  h%=360; if(h<0) h+=360;
+  return h;
+}
+
+/* =========================================================
+   WORLD STATE
+========================================================= */
+let prey=[], preds=[];
+
+function init(){
+  initFood();
+  prey = Array.from({length:cfg.PREY_INIT}, ()=> new Creature("prey", null, null, 0));
+  preds = Array.from({length:cfg.PRED_INIT}, ()=> new Creature("pred", null, null, 0));
+}
+init();
+
+/* =========================================================
+   TARGET SELECTION
+========================================================= */
+function nearestFood(c){
+  let best=null, bd=1e9;
+  for(const f of foods){
+    const d2=(f.x-c.x)*(f.x-c.x)+(f.y-c.y)*(f.y-c.y);
+    if(d2<bd){ bd=d2; best=f; }
+  }
+  return best;
+}
+function nearestPredator(preyCreature){
+  let best=null, bd=1e9;
+  for(const p of preds){
+    const d2=(p.x-preyCreature.x)*(p.x-preyCreature.x)+(p.y-preyCreature.y)*(p.y-preyCreature.y);
+    if(d2<bd){ bd=d2; best=p; }
+  }
+  return best;
+}
+function nearestPrey(predCreature){
+  let best=null, bd=1e9;
+  for(const p of prey){
+    const d2=(p.x-predCreature.x)*(p.x-predCreature.x)+(p.y-predCreature.y)*(p.y-predCreature.y);
+    if(d2<bd){ bd=d2; best=p; }
+  }
+  return best;
+}
+
+/* =========================================================
+   REPRODUCTION (same basic mechanism, split by species)
+========================================================= */
+function reproduceGroup(group, species){
+  // choose all eligible, sort by score desc, pair them
+  const eligible = group.filter(c=>c.canReproduce()).sort((a,b)=>b.score-a.score);
+  for(let i=0;i<eligible.length-1;i+=2){
+    const a=eligible[i], b=eligible[i+1];
+    const childW = Brain.mutate(Brain.crossover(a.genome, b.genome));
+    const childGen = Math.max(a.generation, b.generation) + 1;
+    const child = new Creature(species, childW, [a,b], childGen);
+    child.x = a.x; child.y = a.y;
+
+    a.energy -= cfg.REPRO_COST;
+    b.energy -= cfg.REPRO_COST;
+    a.cooldown = cfg.REPRO_COOLDOWN;
+    b.cooldown = cfg.REPRO_COOLDOWN;
+
+    group.push(child);
+  }
+}
+
+/* =========================================================
+   POPULATION CONTROL (kept “kill weakest when over max”
+   but applied per species so predators don’t wipe prey and vice versa)
+========================================================= */
+function cullToMax(group, maxCount){
+  if(group.length<=maxCount) return;
+  group.sort((a,b)=>a.score-b.score); // weakest first
+  while(group.length>maxCount){
+    group.shift();
+  }
+}
+function boostToMin(group, minCount, species){
+  if(group.length>=minCount) return;
+  // clone best with mutation (kept style)
+  group.sort((a,b)=>b.score-a.score);
+  const best = group[0];
+  while(group.length<minCount){
+    const childW = Brain.mutate(best.genome);
+    const child = new Creature(species, childW, [best,best], best.generation+1);
+    child.x = rand(0,cfg.W); child.y = rand(0,cfg.H);
+    group.push(child);
+  }
+}
+
+/* =========================================================
+   TICK
+========================================================= */
+function tick(){
+  // Step prey (target food, threat predator)
+  for(const c of prey){
+    const food = nearestFood(c);
+    const threat = nearestPredator(c);
+    c.step(food, threat);
+    c.tryEatPellet();
+  }
+
+  // Step predators (target prey, "threat" is food so they can learn to avoid it)
+  for(const p of preds){
+    const target = nearestPrey(p);
+    const avoidFood = nearestFood(p); // fed as "threat" cue
+    p.step(target ? {x:target.x,y:target.y} : null, avoidFood);
+    p.tryAttack(prey);
+    p.tryEatPellet(); // penalized if they do
+  }
+
+  // Death by energy depletion
+  prey = prey.filter(c=>c.energy>0);
+  preds = preds.filter(c=>c.energy>0);
+
+  // Reproduction
+  reproduceGroup(prey, "prey");
+  reproduceGroup(preds, "pred");
+
+  // Population regulation (per species)
+  cullToMax(prey, cfg.PREY_MAX);
+  cullToMax(preds, cfg.PRED_MAX);
+
+  boostToMin(prey, cfg.PREY_MIN, "prey");
+  boostToMin(preds, cfg.PRED_MIN, "pred");
+
+  // Render
+  ctx.clearRect(0,0,cfg.W,cfg.H);
+
+  // Food draw (no regression)
+  for(const f of foods){
+    ctx.fillStyle="#6f6";
+    ctx.beginPath();
+    ctx.arc(f.x,f.y,3,0,Math.PI*2);
+    ctx.fill();
+  }
+
+  // Combine for global top 3 outlines (no regression)
+  const all = prey.concat(preds);
+  all.sort((a,b)=>b.score-a.score);
+
+  // Track best ever per species (no regression to absolute progress)
+  let bestPreyAlive = 0;
+  for(const c of prey) bestPreyAlive = Math.max(bestPreyAlive, c.score);
+  let bestPredAlive = 0;
+  for(const c of preds) bestPredAlive = Math.max(bestPredAlive, c.score);
+
+  bestFitnessEverPrey = Math.max(bestFitnessEverPrey, bestPreyAlive);
+  bestFitnessEverPred = Math.max(bestFitnessEverPred, bestPredAlive);
+
+  // Rank within species + absolute normalized fitness (by best ever of that species)
+  const preySorted = prey.slice().sort((a,b)=>b.score-a.score);
+  const predSorted = preds.slice().sort((a,b)=>b.score-a.score);
+
+  // Draw prey then predators (layering doesn’t matter)
+  for(let i=0;i<preySorted.length;i++){
+    const c = preySorted[i];
+    const absNorm = clamp(c.score / (bestFitnessEverPrey || 1), 0, 1);
+    const topIdx = globalTopIndex(all, c);
+    c.draw(i+1, absNorm, topIdx);
+  }
+
+  for(let i=0;i<predSorted.length;i++){
+    const p = predSorted[i];
+    const absNorm = clamp(p.score / (bestFitnessEverPred || 1), 0, 1);
+    const topIdx = globalTopIndex(all, p);
+    p.draw(i+1, absNorm, topIdx);
+  }
+
+  // HUD richness (kept, expanded; not reduced)
+  const avgPrey = prey.length ? (prey.reduce((s,c)=>s+c.score,0)/prey.length) : 0;
+  const avgPred = preds.length ? (preds.reduce((s,c)=>s+c.score,0)/preds.length) : 0;
+
+  const oldestPreyGen = prey.length ? Math.max(...prey.map(c=>c.generation)) : 0;
+  const oldestPredGen = preds.length ? Math.max(...preds.map(c=>c.generation)) : 0;
+  const oldestAge = all.length ? Math.max(...all.map(c=>c.age)) : 0;
+
+  hud.innerHTML =
+    `Prey: ${prey.length} | Predators: ${preds.length} | Total: ${all.length}<br>`+
+    `Best prey (alive): ${bestPreyAlive.toFixed(2)} | Best prey ever: ${bestFitnessEverPrey.toFixed(2)}<br>`+
+    `Best pred (alive): ${bestPredAlive.toFixed(2)} | Best pred ever: ${bestFitnessEverPred.toFixed(2)}<br>`+
+    `Avg prey fitness: ${avgPrey.toFixed(2)} | Avg pred fitness: ${avgPred.toFixed(2)}<br>`+
+    `Max generation (prey): ${oldestPreyGen} | Max generation (pred): ${oldestPredGen}<br>`+
+    `Oldest age (seconds): ${oldestAge.toFixed(1)}<br>`+
+    `Food clusters: ${cfg.FOOD_CLUSTERS} | Speed scale: ~0.4x<br>`+
+    `NN: ${cfg.N_IN} inputs, ${cfg.N_H} hidden, +1 recurrent, ${cfg.N_OUT} outputs`;
+
+  requestAnimationFrame(tick);
+}
+
+function globalTopIndex(sortedAll, creature){
+  // returns 1/2/3 if in global top3 else 0
+  // (compare by object identity)
+  for(let i=0;i<3 && i<sortedAll.length;i++){
+    if(sortedAll[i]===creature) return i+1;
+  }
+  return 0;
+}
+
+tick();
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,484 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>NeuroEvo Creatures (Canvas)</title>
+  <style>
+    html, body { margin:0; padding:0; background:#111; overflow:hidden; }
+    #hud {
+      position: fixed; left: 10px; top: 10px; color: #ddd;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font-size: 14px; line-height: 1.3;
+      background: rgba(0,0,0,0.35); padding: 10px 12px; border-radius: 10px;
+    }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <div id="hud"></div>
+  <canvas id="c"></canvas>
+
+<script>
+(() => {
+  // ---------------------------
+  // Config
+  // ---------------------------
+  const cfg = {
+    W: window.innerWidth,
+    H: window.innerHeight,
+
+    POP_INIT: 40,
+    POP_MIN: 30,
+    POP_MAX: 70,
+
+    FOOD_COUNT: 120,
+    FOOD_ENERGY: 30,
+
+    DT: 1/60,
+    SPEED_LIMIT: 180,     // px/s
+    TURN_LIMIT: 8.0,      // rad/s
+    ACCEL: 260,           // px/s^2 base thrust scaling
+    TURN_ACCEL: 14.0,     // rad/s^2 steering scaling
+    FRICTION: 0.98,
+
+    // Energy model
+    ENERGY_INIT: 70,
+    ENERGY_MAX: 160,
+    ENERGY_DECAY_PER_SEC: 3.0,
+    ENERGY_MOVE_COST: 0.010,     // per unit speed per sec
+    ENERGY_TURN_COST: 0.40,      // per |omega| per sec
+    ENERGY_EAT_GAIN: 30,
+
+    // Reproduction
+    REPRO_THRESHOLD: 120,
+    REPRO_COST: 55,
+    REPRO_COOLDOWN: 3.0,         // seconds
+
+    // Neuroevolution
+    MUT_RATE: 0.12,
+    MUT_SCALE: 0.40,
+    WEIGHT_CLAMP: 3.0,
+
+    // Network shape
+    N_IN: 10,
+    N_H: 10,
+    N_OUT: 2, // thrust, turn
+
+    // Sensing
+    SENSE_RADIUS: 200,
+    EAT_RADIUS: 8,
+    AGENT_RADIUS: 5,
+
+    // Rendering
+    DRAW_VECTORS: false
+  };
+
+  // ---------------------------
+  // Canvas setup
+  // ---------------------------
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+
+  function resize() {
+    cfg.W = window.innerWidth;
+    cfg.H = window.innerHeight;
+    canvas.width = cfg.W;
+    canvas.height = cfg.H;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------------------------
+  // Utility
+  // ---------------------------
+  const rand = (a=0, b=1) => a + Math.random()*(b-a);
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  const wrap = (x, max) => (x < 0 ? x + max : (x >= max ? x - max : x));
+  const len = (x,y) => Math.hypot(x,y);
+  const norm = (x,y) => {
+    const m = Math.hypot(x,y) || 1;
+    return [x/m, y/m];
+  };
+
+  // ---------------------------
+  // Tiny NN (1 hidden layer)
+  // outputs: thrust in [0,1], turn in [-1,1]
+  // ---------------------------
+  function sigmoid(x){ return 1/(1+Math.exp(-x)); }
+  function tanh(x){ return Math.tanh(x); }
+
+  class Brain {
+    constructor(weights=null) {
+      // Layout:
+      // W1: (N_H x (N_IN+1)) including bias
+      // W2: (N_OUT x (N_H+1)) including bias
+      this.nIn = cfg.N_IN;
+      this.nH = cfg.N_H;
+      this.nOut = cfg.N_OUT;
+
+      const count = this.weightCount();
+      this.w = weights ? weights.slice() : Array.from({length: count}, () => rand(-1, 1));
+    }
+
+    weightCount() {
+      return (this.nH*(this.nIn+1)) + (this.nOut*(this.nH+1));
+    }
+
+    forward(inputs) {
+      if (inputs.length !== this.nIn) throw new Error("bad input size");
+      let idx = 0;
+
+      // Hidden
+      const h = new Array(this.nH);
+      for (let i=0; i<this.nH; i++) {
+        let s = 0;
+        for (let j=0; j<this.nIn; j++) s += this.w[idx++] * inputs[j];
+        s += this.w[idx++] * 1.0; // bias
+        h[i] = tanh(s);
+      }
+
+      // Output
+      const out = new Array(this.nOut);
+      for (let i=0; i<this.nOut; i++) {
+        let s = 0;
+        for (let j=0; j<this.nH; j++) s += this.w[idx++] * h[j];
+        s += this.w[idx++] * 1.0; // bias
+        out[i] = s;
+      }
+
+      // Interpret outputs
+      const thrust = sigmoid(out[0]);      // 0..1
+      const turn = tanh(out[1]);           // -1..1
+      return [thrust, turn];
+    }
+
+    static crossover(a, b) {
+      const n = a.length;
+      const p = Math.floor(rand(1, n-1));
+      const child = new Array(n);
+      for (let i=0; i<n; i++) child[i] = (i < p) ? a[i] : b[i];
+      return child;
+    }
+
+    static mutate(w) {
+      const out = w.slice();
+      for (let i=0; i<out.length; i++) {
+        if (Math.random() < cfg.MUT_RATE) {
+          out[i] += rand(-1, 1) * cfg.MUT_SCALE;
+          out[i] = clamp(out[i], -cfg.WEIGHT_CLAMP, cfg.WEIGHT_CLAMP);
+        }
+      }
+      return out;
+    }
+  }
+
+  // ---------------------------
+  // Entities
+  // ---------------------------
+  class Food {
+    constructor() {
+      this.x = rand(0, cfg.W);
+      this.y = rand(0, cfg.H);
+    }
+    respawn() {
+      this.x = rand(0, cfg.W);
+      this.y = rand(0, cfg.H);
+    }
+    draw() {
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 3, 0, Math.PI*2);
+      ctx.fillStyle = "#6f6";
+      ctx.fill();
+    }
+  }
+
+  class Creature {
+    constructor(brainWeights=null) {
+      this.x = rand(0, cfg.W);
+      this.y = rand(0, cfg.H);
+      this.vx = rand(-20, 20);
+      this.vy = rand(-20, 20);
+      this.angle = rand(0, Math.PI*2);
+      this.omega = rand(-1, 1);
+
+      this.energy = cfg.ENERGY_INIT;
+      this.age = 0;
+      this.score = 0;        // fitness accumulator
+      this.eaten = 0;
+
+      this.cooldown = rand(0, cfg.REPRO_COOLDOWN);
+      this.brain = new Brain(brainWeights);
+      this.genome = this.brain.w; // convenience
+    }
+
+    sense(nearestFood, nearestMate) {
+      // Inputs normalized roughly to -1..1
+      // 0-1: food direction in body frame
+      // 2: food distance normalized
+      // 3-4: mate direction in body frame
+      // 5: mate distance normalized
+      // 6: energy normalized
+      // 7: speed normalized
+      // 8: angular velocity normalized
+      // 9: bias-like constant (optional; but our net already has bias, so use something informative)
+
+      const fx = nearestFood ? (nearestFood.x - this.x) : 0;
+      const fy = nearestFood ? (nearestFood.y - this.y) : 0;
+      const fd = Math.min(len(fx, fy), cfg.SENSE_RADIUS);
+      const [fnx, fny] = (fd > 0) ? [fx/fd, fy/fd] : [0,0];
+
+      const mx = nearestMate ? (nearestMate.x - this.x) : 0;
+      const my = nearestMate ? (nearestMate.y - this.y) : 0;
+      const md = Math.min(len(mx, my), cfg.SENSE_RADIUS);
+      const [mnx, mny] = (md > 0) ? [mx/md, my/md] : [0,0];
+
+      // Rotate world direction into body frame
+      const ca = Math.cos(this.angle), sa = Math.sin(this.angle);
+      const fbx =  ca*fnx + sa*fny;
+      const fby = -sa*fnx + ca*fny;
+      const mbx =  ca*mnx + sa*mny;
+      const mby = -sa*mnx + ca*mny;
+
+      const speed = len(this.vx, this.vy);
+      return [
+        clamp(fbx, -1, 1),
+        clamp(fby, -1, 1),
+        clamp(1 - (fd / cfg.SENSE_RADIUS), 0, 1), // closer food -> bigger
+        clamp(mbx, -1, 1),
+        clamp(mby, -1, 1),
+        clamp(1 - (md / cfg.SENSE_RADIUS), 0, 1),
+        clamp(this.energy / cfg.ENERGY_MAX, 0, 1),
+        clamp(speed / cfg.SPEED_LIMIT, 0, 1),
+        clamp(this.omega / cfg.TURN_LIMIT, -1, 1),
+        1.0
+      ];
+    }
+
+    step(nearestFood, nearestMate) {
+      const inputs = this.sense(nearestFood, nearestMate);
+      const [thrust, turn] = this.brain.forward(inputs);
+
+      // Apply turning
+      this.omega += turn * cfg.TURN_ACCEL * cfg.DT;
+      this.omega = clamp(this.omega, -cfg.TURN_LIMIT, cfg.TURN_LIMIT);
+      this.angle += this.omega * cfg.DT;
+
+      // Apply thrust in facing direction
+      const ax = Math.cos(this.angle) * (thrust * cfg.ACCEL);
+      const ay = Math.sin(this.angle) * (thrust * cfg.ACCEL);
+      this.vx += ax * cfg.DT;
+      this.vy += ay * cfg.DT;
+
+      // Speed limit
+      const sp = len(this.vx, this.vy);
+      if (sp > cfg.SPEED_LIMIT) {
+        const s = cfg.SPEED_LIMIT / sp;
+        this.vx *= s; this.vy *= s;
+      }
+
+      // Integrate
+      this.x = wrap(this.x + this.vx * cfg.DT, cfg.W);
+      this.y = wrap(this.y + this.vy * cfg.DT, cfg.H);
+
+      // Friction
+      this.vx *= cfg.FRICTION;
+      this.vy *= cfg.FRICTION;
+      this.omega *= 0.995;
+
+      // Energy + fitness shaping
+      const speed = len(this.vx, this.vy);
+      this.energy -= cfg.ENERGY_DECAY_PER_SEC * cfg.DT;
+      this.energy -= cfg.ENERGY_MOVE_COST * speed * cfg.DT;
+      this.energy -= cfg.ENERGY_TURN_COST * Math.abs(this.omega) * cfg.DT;
+      this.energy = clamp(this.energy, 0, cfg.ENERGY_MAX);
+
+      // Dense fitness: survive + eat
+      this.age += cfg.DT;
+      this.cooldown = Math.max(0, this.cooldown - cfg.DT);
+      this.score += 0.02 * cfg.DT; // small survival reward (kept tiny)
+      this.score += 0.0005 * (1 - inputs[2]) * cfg.DT; // tiny reward for approaching food (optional)
+
+      return { thrust, turn };
+    }
+
+    tryEat(food) {
+      const d = len(food.x - this.x, food.y - this.y);
+      if (d < cfg.EAT_RADIUS) {
+        this.energy = clamp(this.energy + cfg.ENERGY_EAT_GAIN, 0, cfg.ENERGY_MAX);
+        this.score += 2.0; // big immediate reward
+        this.eaten += 1;
+        food.respawn();
+        return true;
+      }
+      return false;
+    }
+
+    canReproduce() {
+      return this.energy >= cfg.REPRO_THRESHOLD && this.cooldown <= 0;
+    }
+
+    draw(best=false) {
+      // Color by energy
+      const e = this.energy / cfg.ENERGY_MAX;
+      const r = Math.floor(80 + 175*(1-e));
+      const g = Math.floor(80 + 175*e);
+      const b = 120;
+
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+
+      ctx.beginPath();
+      ctx.moveTo(cfg.AGENT_RADIUS*1.6, 0);
+      ctx.lineTo(-cfg.AGENT_RADIUS, cfg.AGENT_RADIUS*0.9);
+      ctx.lineTo(-cfg.AGENT_RADIUS, -cfg.AGENT_RADIUS*0.9);
+      ctx.closePath();
+
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fill();
+
+      if (best) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#ffd54a";
+        ctx.stroke();
+      }
+
+      if (cfg.DRAW_VECTORS) {
+        ctx.beginPath();
+        ctx.moveTo(0,0);
+        ctx.lineTo(cfg.AGENT_RADIUS*3, 0);
+        ctx.strokeStyle = "#fff";
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+  }
+
+  // ---------------------------
+  // World state
+  // ---------------------------
+  const foods = Array.from({length: cfg.FOOD_COUNT}, () => new Food());
+  let creatures = Array.from({length: cfg.POP_INIT}, () => new Creature());
+
+  function nearestFoodFor(c) {
+    let best = null, bestD = Infinity;
+    for (const f of foods) {
+      const dx = f.x - c.x, dy = f.y - c.y;
+      const d = dx*dx + dy*dy;
+      if (d < bestD) { bestD = d; best = f; }
+    }
+    return best;
+  }
+
+  function nearestMateFor(c) {
+    let best = null, bestD = Infinity;
+    for (const o of creatures) {
+      if (o === c) continue;
+      const dx = o.x - c.x, dy = o.y - c.y;
+      const d = dx*dx + dy*dy;
+      if (d < bestD) { bestD = d; best = o; }
+    }
+    return best;
+  }
+
+  function reproduce() {
+    // Find candidates
+    const parents = creatures.filter(c => c.canReproduce());
+    if (parents.length < 2) return;
+
+    // Sort by score so high performers more likely to reproduce
+    parents.sort((a,b) => b.score - a.score);
+
+    // Create up to a few children per tick
+    const births = Math.min(3, Math.floor(parents.length / 2));
+    for (let i=0; i<births; i++) {
+      const p1 = parents[Math.floor(rand(0, Math.min(10, parents.length)))];
+      const p2 = parents[Math.floor(rand(0, Math.min(10, parents.length)))];
+      if (p1 === p2) continue;
+
+      const childW = Brain.mutate(Brain.crossover(p1.genome, p2.genome));
+      const child = new Creature(childW);
+
+      // Inherit position near parent
+      child.x = wrap(p1.x + rand(-10, 10), cfg.W);
+      child.y = wrap(p1.y + rand(-10, 10), cfg.H);
+      child.energy = cfg.ENERGY_INIT;
+
+      // Energy cost + cooldown on parents
+      p1.energy = clamp(p1.energy - cfg.REPRO_COST, 0, cfg.ENERGY_MAX);
+      p2.energy = clamp(p2.energy - cfg.REPRO_COST, 0, cfg.ENERGY_MAX);
+      p1.cooldown = cfg.REPRO_COOLDOWN;
+      p2.cooldown = cfg.REPRO_COOLDOWN;
+
+      creatures.push(child);
+    }
+  }
+
+  function cullAndRefill() {
+    // Remove dead
+    creatures = creatures.filter(c => c.energy > 0);
+
+    // Cap max pop (remove lowest score)
+    if (creatures.length > cfg.POP_MAX) {
+      creatures.sort((a,b) => b.score - a.score);
+      creatures.length = cfg.POP_MAX;
+    }
+
+    // Ensure minimum population by cloning / mutating top performers
+    if (creatures.length < cfg.POP_MIN) {
+      creatures.sort((a,b) => b.score - a.score);
+      const seed = creatures[0] || new Creature();
+      while (creatures.length < cfg.POP_MIN) {
+        const childW = Brain.mutate(seed.genome);
+        creatures.push(new Creature(childW));
+      }
+    }
+  }
+
+  // ---------------------------
+  // Main loop
+  // ---------------------------
+  let last = performance.now();
+  function tick(now) {
+    const dt = cfg.DT; // fixed step
+
+    // Step sim
+    for (const c of creatures) {
+      const nf = nearestFoodFor(c);
+      const nm = nearestMateFor(c);
+      c.step(nf, nm);
+      if (nf) c.tryEat(nf);
+    }
+
+    reproduce();
+    cullAndRefill();
+
+    // Draw
+    ctx.clearRect(0, 0, cfg.W, cfg.H);
+
+    for (const f of foods) f.draw();
+
+    // Highlight best
+    let best = null;
+    for (const c of creatures) if (!best || c.score > best.score) best = c;
+
+    for (const c of creatures) c.draw(c === best);
+
+    // HUD
+    hud.innerHTML =
+      `Creatures: ${creatures.length}<br>` +
+      `Best score: ${best ? best.score.toFixed(2) : "n/a"}<br>` +
+      `Best eaten: ${best ? best.eaten : "n/a"}<br>` +
+      `Avg score: ${(creatures.reduce((s,c)=>s+c.score,0)/creatures.length).toFixed(2)}<br>` +
+      `Food: ${foods.length}`;
+
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,375 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Neuro-Evolution Sandbox</title>
+<style>
+html, body { margin:0; padding:0; background:#111; overflow:hidden; }
+canvas { display:block; }
+#hud {
+  position: fixed;
+  left: 10px;
+  top: 10px;
+  color: #ddd;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  background: rgba(0,0,0,0.4);
+  padding: 10px;
+  border-radius: 10px;
+}
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<canvas id="c"></canvas>
+
+<script>
+(() => {
+
+/* =========================
+   CONFIG
+========================= */
+const cfg = {
+  W: innerWidth,
+  H: innerHeight,
+
+  POP_INIT: 40,
+  POP_MIN: 30,
+  POP_MAX: 70,
+
+  FOOD_CLUSTERS: 6,
+  FOOD_PER_CLUSTER: 25,
+  FOOD_RADIUS: 140,
+  FOOD_ENERGY: 30,
+
+  DT: 1/60,
+  SPEED_LIMIT: 180,
+  TURN_LIMIT: 7.0,
+  ACCEL: 260,
+  TURN_ACCEL: 14.0,
+  FRICTION: 0.985,
+
+  ENERGY_INIT: 70,
+  ENERGY_MAX: 160,
+  ENERGY_DECAY: 3.0,
+  ENERGY_MOVE_COST: 0.010,
+  ENERGY_TURN_COST: 0.25,
+
+  REPRO_THRESHOLD: 120,
+  REPRO_COST: 55,
+  REPRO_COOLDOWN: 3.0,
+
+  MUT_RATE: 0.12,
+  MUT_SCALE: 0.4,
+  WEIGHT_CLAMP: 3.0,
+
+  N_IN: 10,
+  N_H: 10,
+  N_OUT: 2,
+
+  SENSE_RADIUS: 220,
+  EAT_RADIUS: 8,
+  AGENT_RADIUS: 5
+};
+
+/* =========================
+   CANVAS
+========================= */
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const hud = document.getElementById("hud");
+
+function resize(){
+  canvas.width = cfg.W = innerWidth;
+  canvas.height = cfg.H = innerHeight;
+}
+addEventListener("resize", resize);
+resize();
+
+/* =========================
+   UTIL
+========================= */
+const rand = (a=0,b=1)=>a+Math.random()*(b-a);
+const clamp = (x,a,b)=>Math.max(a,Math.min(b,x));
+const len = (x,y)=>Math.hypot(x,y);
+const wrap=(x,m)=>x<0?x+m:(x>=m?x-m:x);
+
+/* =========================
+   BRAIN
+========================= */
+const tanh = Math.tanh;
+const sigmoid = x=>1/(1+Math.exp(-x));
+
+class Brain {
+  constructor(w=null){
+    this.w = w ? w.slice() :
+      Array.from({length:this.count()},()=>rand(-1,1));
+  }
+  count(){
+    return cfg.N_H*(cfg.N_IN+1)+cfg.N_OUT*(cfg.N_H+1);
+  }
+  forward(inp){
+    let i=0;
+    const h=[];
+    for(let n=0;n<cfg.N_H;n++){
+      let s=0;
+      for(let k=0;k<cfg.N_IN;k++) s+=this.w[i++]*inp[k];
+      s+=this.w[i++]; h[n]=tanh(s);
+    }
+    let s0=0,s1=0;
+    for(let k=0;k<cfg.N_H;k++) s0+=this.w[i++]*h[k];
+    s0+=this.w[i++];
+    for(let k=0;k<cfg.N_H;k++) s1+=this.w[i++]*h[k];
+    s1+=this.w[i++];
+    return [sigmoid(s0), tanh(s1)];
+  }
+  static crossover(a,b){
+    const p=Math.floor(rand(1,a.length-1));
+    return a.map((v,i)=>i<p?v:b[i]);
+  }
+  static mutate(w){
+    return w.map(v=>{
+      if(Math.random()<cfg.MUT_RATE){
+        v+=rand(-1,1)*cfg.MUT_SCALE;
+        v=clamp(v,-cfg.WEIGHT_CLAMP,cfg.WEIGHT_CLAMP);
+      }
+      return v;
+    });
+  }
+}
+
+/* =========================
+   FOOD (CLUSTERS)
+========================= */
+const clusters=[];
+const foods=[];
+
+function initFood(){
+  clusters.length=0;
+  foods.length=0;
+  for(let i=0;i<cfg.FOOD_CLUSTERS;i++){
+    clusters.push({
+      x:rand(0,cfg.W),
+      y:rand(0,cfg.H),
+      vx:rand(-10,10),
+      vy:rand(-10,10)
+    });
+  }
+  clusters.forEach(c=>{
+    for(let i=0;i<cfg.FOOD_PER_CLUSTER;i++){
+      foods.push({
+        cluster:c,
+        x:0,y:0
+      });
+    }
+  });
+  respawnAllFood();
+}
+function respawnAllFood(){
+  foods.forEach(f=>{
+    const c=f.cluster;
+    const a=rand(0,Math.PI*2);
+    const r=rand(0,cfg.FOOD_RADIUS);
+    f.x=wrap(c.x+Math.cos(a)*r,cfg.W);
+    f.y=wrap(c.y+Math.sin(a)*r,cfg.H);
+  });
+}
+function updateFood(){
+  clusters.forEach(c=>{
+    c.x=wrap(c.x+c.vx*cfg.DT,cfg.W);
+    c.y=wrap(c.y+c.vy*cfg.DT,cfg.H);
+  });
+}
+
+/* =========================
+   CREATURE
+========================= */
+let nextId=0;
+class Creature{
+  constructor(w=null,parents=null){
+    this.id=nextId++;
+    this.x=rand(0,cfg.W);
+    this.y=rand(0,cfg.H);
+    this.vx=0; this.vy=0;
+    this.angle=rand(0,Math.PI*2);
+    this.omega=0;
+    this.energy=cfg.ENERGY_INIT;
+    this.score=0;
+    this.cooldown=0;
+    this.brain=new Brain(w);
+    this.genome=this.brain.w;
+
+    if(parents){
+      this.hue=(parents[0].hue+parents[1].hue)/2+rand(-8,8);
+    }else{
+      this.hue=rand(0,360);
+    }
+  }
+  sense(food){
+    const fx=food?food.x-this.x:0;
+    const fy=food?food.y-this.y:0;
+    const d=Math.min(len(fx,fy),cfg.SENSE_RADIUS);
+    const nx=d?fx/d:0, ny=d?fy/d:0;
+    const ca=Math.cos(this.angle), sa=Math.sin(this.angle);
+    const fbx= ca*nx+sa*ny;
+    const fby=-sa*nx+ca*ny;
+    const sp=len(this.vx,this.vy);
+    return [
+      fbx,fby,1-d/cfg.SENSE_RADIUS,
+      this.energy/cfg.ENERGY_MAX,
+      sp/cfg.SPEED_LIMIT,
+      this.omega/cfg.TURN_LIMIT,
+      Math.cos(this.angle),
+      Math.sin(this.angle),
+      1,1
+    ];
+  }
+  step(food){
+    const [thrust,turn]=this.brain.forward(this.sense(food));
+    this.omega+=turn*cfg.TURN_ACCEL*cfg.DT;
+    this.omega=clamp(this.omega,-cfg.TURN_LIMIT,cfg.TURN_LIMIT);
+    this.angle+=this.omega*cfg.DT;
+    const ax=Math.cos(this.angle)*thrust*cfg.ACCEL;
+    const ay=Math.sin(this.angle)*thrust*cfg.ACCEL;
+    this.vx+=ax*cfg.DT; this.vy+=ay*cfg.DT;
+    const sp=len(this.vx,this.vy);
+    if(sp>cfg.SPEED_LIMIT){
+      const s=cfg.SPEED_LIMIT/sp;
+      this.vx*=s; this.vy*=s;
+    }
+    this.x=wrap(this.x+this.vx*cfg.DT,cfg.W);
+    this.y=wrap(this.y+this.vy*cfg.DT,cfg.H);
+    this.vx*=cfg.FRICTION; this.vy*=cfg.FRICTION;
+    this.omega*=0.96;
+
+    const forward=(Math.cos(this.angle)*(this.vx/sp||0)+
+                   Math.sin(this.angle)*(this.vy/sp||0));
+    this.score+=Math.max(0,forward)*sp*0.0005;
+
+    this.energy-=cfg.ENERGY_DECAY*cfg.DT;
+    this.energy-=cfg.ENERGY_MOVE_COST*sp*cfg.DT;
+    this.energy-=cfg.ENERGY_TURN_COST*(this.omega*this.omega)*cfg.DT;
+    this.energy=clamp(this.energy,0,cfg.ENERGY_MAX);
+    this.cooldown=Math.max(0,this.cooldown-cfg.DT);
+  }
+  tryEat(){
+    for(const f of foods){
+      if(len(f.x-this.x,f.y-this.y)<cfg.EAT_RADIUS){
+        this.energy=clamp(this.energy+cfg.FOOD_ENERGY,0,cfg.ENERGY_MAX);
+        this.score+=2;
+        f.x=rand(0,cfg.W); f.y=rand(0,cfg.H);
+      }
+    }
+  }
+  canReproduce(){
+    return this.energy>cfg.REPRO_THRESHOLD&&this.cooldown<=0;
+  }
+  draw(rank,norm){
+    ctx.save();
+    ctx.translate(this.x,this.y);
+    ctx.rotate(this.angle);
+    ctx.beginPath();
+    ctx.moveTo(8,0);
+    ctx.lineTo(-6,4);
+    ctx.lineTo(-6,-4);
+    ctx.closePath();
+    ctx.fillStyle=`hsl(${this.hue},70%,50%)`;
+    ctx.fill();
+    if(rank<=3){
+      ctx.lineWidth=rank===1?3:2;
+      ctx.strokeStyle=rank===1?"#ffd700":rank===2?"#ccc":"#cd7f32";
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.fillStyle="#fff";
+    ctx.font="10px system-ui";
+    ctx.textAlign="center";
+    ctx.fillText(
+      `${rank} (${norm.toFixed(2)})`,
+      this.x,this.y-10
+    );
+  }
+}
+
+/* =========================
+   WORLD
+========================= */
+let creatures=[];
+function init(){
+  initFood();
+  creatures=Array.from({length:cfg.POP_INIT},()=>new Creature());
+}
+init();
+
+/* =========================
+   LOOP
+========================= */
+function nearestFood(c){
+  let best=null,bd=1e9;
+  foods.forEach(f=>{
+    const d=(f.x-c.x)**2+(f.y-c.y)**2;
+    if(d<bd){bd=d;best=f;}
+  });
+  return best;
+}
+
+function tick(){
+  updateFood();
+  creatures.forEach(c=>{
+    c.step(nearestFood(c));
+    c.tryEat();
+  });
+
+  const parents=creatures.filter(c=>c.canReproduce());
+  parents.sort((a,b)=>b.score-a.score);
+  for(let i=0;i<parents.length-1;i+=2){
+    const a=parents[i],b=parents[i+1];
+    const w=Brain.mutate(Brain.crossover(a.genome,b.genome));
+    const child=new Creature(w,[a,b]);
+    child.x=a.x; child.y=a.y;
+    a.energy-=cfg.REPRO_COST; b.energy-=cfg.REPRO_COST;
+    a.cooldown=b.cooldown=cfg.REPRO_COOLDOWN;
+    creatures.push(child);
+  }
+
+  creatures=creatures.filter(c=>c.energy>0);
+  if(creatures.length>cfg.POP_MAX){
+    creatures.sort((a,b)=>b.score-a.score);
+    creatures.length=cfg.POP_MAX;
+  }
+  if(creatures.length<cfg.POP_MIN){
+    const best=creatures[0];
+    while(creatures.length<cfg.POP_MIN){
+      creatures.push(new Creature(Brain.mutate(best.genome),[best,best]));
+    }
+  }
+
+  ctx.clearRect(0,0,cfg.W,cfg.H);
+  foods.forEach(f=>{
+    ctx.fillStyle="#6f6";
+    ctx.beginPath();
+    ctx.arc(f.x,f.y,3,0,Math.PI*2);
+    ctx.fill();
+  });
+
+  creatures.sort((a,b)=>b.score-a.score);
+  const max=creatures[0]?.score||1;
+  const min=creatures[creatures.length-1]?.score||0;
+  creatures.forEach((c,i)=>{
+    const n=(c.score-min)/(max-min||1);
+    c.draw(i+1,n);
+  });
+
+  hud.innerHTML=
+    `Creatures: ${creatures.length}<br>`+
+    `Top score: ${max.toFixed(2)}`;
+
+  requestAnimationFrame(tick);
+}
+tick();
+
+})();
+</script>
+</body>
+</html>

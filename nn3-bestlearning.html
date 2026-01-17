@@ -1,0 +1,485 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Neuro Evolution Sandbox</title>
+<style>
+html, body { margin:0; padding:0; background:#111; overflow:hidden; }
+canvas { display:block; }
+#hud {
+  position: fixed;
+  left: 10px;
+  top: 10px;
+  color: #ddd;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  background: rgba(0,0,0,0.45);
+  padding: 10px;
+  border-radius: 10px;
+}
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<canvas id="c"></canvas>
+
+<script>
+(() => {
+
+/* =========================
+   CONFIG
+========================= */
+const cfg = {
+  W: innerWidth,
+  H: innerHeight,
+
+  POP_INIT: 40,
+  POP_MIN: 20,
+  POP_MAX: 70,
+
+  FOOD_CLUSTERS: 24,
+  FOOD_PER_CLUSTER: 2,
+  FOOD_RADIUS: 150,
+  FOOD_ENERGY: 16,
+  MAX_CHILDREN: 3,
+  
+
+  DT: 1/60,
+
+  SPEED_LIMIT: 80,
+  ACCEL: 40,
+  TURN_LIMIT: 4.5,
+  TURN_ACCEL: 6.5,
+  FRICTION: 0.985,
+
+  BOOST_MULT: 3.0,
+  BOOST_ACCEL_MULT: 4.2,   // immediate punch
+  BOOST_COST: 4,
+  BOOST_COOLDOWN: 5,
+  BOOST_SPEED_MULT: 3,
+BOOST_DURATION: 0.5, // seconds
+
+  BRAKE_FORCE: 0.75,
+  BRAKE_COST: 6,
+  BRAKE_COOLDOWN: 1.5,
+
+  ENERGY_INIT: 70,
+  ENERGY_MAX: 160,
+  ENERGY_DECAY: 3.2,
+  ENERGY_MOVE_COST: 0.012,
+  ENERGY_TURN_COST: 0.15,
+
+  REPRO_THRESHOLD: 120,
+  REPRO_COST: 55,
+  REPRO_COOLDOWN: 3.0,
+
+  MUT_RATE: 0.18,
+  MUT_SCALE: 0.4,
+  WEIGHT_CLAMP: 3.0,
+
+  N_IN: 12,
+  N_H: 16,
+  N_OUT: 4,
+
+  SENSE_RADIUS: 240,
+  EAT_RADIUS: 8,
+  AGENT_RADIUS: 5
+};
+
+/* =========================
+   CANVAS
+========================= */
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const hud = document.getElementById("hud");
+
+function resize(){
+  canvas.width = cfg.W = innerWidth;
+  canvas.height = cfg.H = innerHeight;
+}
+addEventListener("resize", resize);
+resize();
+
+/* =========================
+   GLOBAL FITNESS TRACKING
+========================= */
+let bestFitnessEver = 0;
+let nextBirthId = 1;
+let currentGeneration = 1;
+
+/* =========================
+   UTIL
+========================= */
+const rand=(a=0,b=1)=>a+Math.random()*(b-a);
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const len=(x,y)=>Math.hypot(x,y);
+const wrap=(x,m)=>x<0?x+m:(x>=m?x-m:x);
+
+/* =========================
+   BRAIN
+========================= */
+const tanh=Math.tanh;
+const sigmoid=x=>1/(1+Math.exp(-x));
+
+class Brain{
+  constructor(w=null){
+    this.w=w?w.slice():Array.from({length:this.count()},()=>rand(-1,1));
+  }
+  count(){
+    return cfg.N_H*(cfg.N_IN+1)+cfg.N_OUT*(cfg.N_H+1);
+  }
+  forward(inp){
+    let i=0,h=[];
+    for(let n=0;n<cfg.N_H;n++){
+      let s=0;
+      for(let k=0;k<cfg.N_IN;k++) s+=this.w[i++]*inp[k];
+      s+=this.w[i++]; h[n]=tanh(s);
+    }
+    const out=[];
+    for(let o=0;o<cfg.N_OUT;o++){
+      let s=0;
+      for(let k=0;k<cfg.N_H;k++) s+=this.w[i++]*h[k];
+      s+=this.w[i++];
+      out[o]=s;
+    }
+    return [
+      sigmoid(out[0]),     // thrust
+      tanh(out[1]),        // turn
+      sigmoid(out[2]),     // boost
+      sigmoid(out[3])      // brake
+    ];
+  }
+  static crossover(a,b){
+    const p=Math.floor(rand(1,a.length-1));
+    return a.map((v,i)=>i<p?v:b[i]);
+  }
+  static mutate(w){
+    return w.map(v=>{
+      if(Math.random()<cfg.MUT_RATE){
+        v+=rand(-1,1)*cfg.MUT_SCALE;
+        v=clamp(v,-cfg.WEIGHT_CLAMP,cfg.WEIGHT_CLAMP);
+      }
+      return v;
+    });
+  }
+}
+
+/* =========================
+   FOOD
+========================= */
+const clusters=[],foods=[];
+function initFood(){
+  clusters.length=foods.length=0;
+  for(let i=0;i<cfg.FOOD_CLUSTERS;i++){
+    clusters.push({x:rand(0,cfg.W),y:rand(0,cfg.H)});
+  }
+  clusters.forEach(c=>{
+    for(let i=0;i<cfg.FOOD_PER_CLUSTER;i++){
+      foods.push({c,x:0,y:0});
+    }
+  });
+  respawnFood();
+}
+function respawnFood(){
+  foods.forEach(f=>{
+    const a=rand(0,Math.PI*2),r=rand(0,cfg.FOOD_RADIUS);
+    f.x=wrap(f.c.x+Math.cos(a)*r,cfg.W);
+    f.y=wrap(f.c.y+Math.sin(a)*r,cfg.H);
+  });
+}
+
+/* =========================
+   CREATURE
+========================= */
+class Creature{
+  constructor(w=null,parents=null){
+    this.x=rand(0,cfg.W); this.y=rand(0,cfg.H);
+	this.birthId = nextBirthId++;
+	  this.generation = parents
+		? Math.max(parents[0].generation, parents[1].generation) + 1
+		: 1;
+    this.vx=0; this.vy=0;
+    this.angle=rand(0,Math.PI*2);
+    this.omega=0;
+    this.energy=cfg.ENERGY_INIT;
+    this.score=0;
+    this.cooldown=0;
+    this.boostCD=0;
+    this.brakeCD=0;
+	this.children = 0;
+	this.prevFoodDist = Infinity;
+	this.timeSinceEat = 0;
+	this.foodEaten = 0;
+	this.boostTime = 0;
+    this.brain=new Brain(w);
+    this.genome=this.brain.w;
+    this.hue=parents?
+      (parents[0].hue+parents[1].hue)/2+rand(-10,10):
+      rand(0,360);
+  }
+
+  sense(food){
+    const fx=food?food.x-this.x:0, fy=food?food.y-this.y:0;
+    const d=Math.min(len(fx,fy),cfg.SENSE_RADIUS);
+    const nx=d?fx/d:0, ny=d?fy/d:0;
+    const ca=Math.cos(this.angle), sa=Math.sin(this.angle);
+    const fbx=ca*nx+sa*ny, fby=-sa*nx+ca*ny;
+    const sp=len(this.vx,this.vy);
+    return [
+      fbx, fby,
+      1-d/cfg.SENSE_RADIUS,
+      this.energy/cfg.ENERGY_MAX,
+      sp/cfg.SPEED_LIMIT,
+      this.omega/cfg.TURN_LIMIT,
+      Math.cos(this.angle),
+      Math.sin(this.angle),
+      this.boostCD>0?1:0,
+      this.brakeCD>0?1:0,
+      1,1
+    ];
+  }
+
+  step(food){
+    const [thrust,turn,boost,brake]=this.brain.forward(this.sense(food));
+
+    this.omega+=turn*cfg.TURN_ACCEL*cfg.DT;
+    this.omega=clamp(this.omega,-cfg.TURN_LIMIT,cfg.TURN_LIMIT);
+    this.angle+=this.omega*cfg.DT;
+
+    let accel = cfg.ACCEL;
+	if (this.boostTime > 0) {
+	  accel *= cfg.BOOST_ACCEL_MULT;
+	}
+    if (boost > 0.6 && this.boostCD <= 0 && this.energy > cfg.BOOST_COST) {
+  this.boostTime = cfg.BOOST_DURATION;
+  this.energy -= cfg.BOOST_COST;
+  this.boostCD = cfg.BOOST_COOLDOWN;
+}
+
+    const ax=Math.cos(this.angle)*thrust*accel;
+    const ay=Math.sin(this.angle)*thrust*accel;
+    this.vx+=ax*cfg.DT; this.vy+=ay*cfg.DT;
+
+    if(brake>0.6&&this.brakeCD<=0&&this.energy>cfg.BRAKE_COST){
+      this.vx*=cfg.BRAKE_FORCE;
+      this.vy*=cfg.BRAKE_FORCE;
+      this.energy-=cfg.BRAKE_COST;
+      this.brakeCD=cfg.BRAKE_COOLDOWN;
+    }
+
+    const boostFactor = this.boostTime > 0 ? cfg.BOOST_SPEED_MULT : 1;
+	const maxSpeed = cfg.SPEED_LIMIT * boostFactor;
+
+	const sp = len(this.vx, this.vy);
+	if (sp > maxSpeed) {
+	  const s = maxSpeed / sp;
+	  this.vx *= s;
+	  this.vy *= s;
+	}
+
+    this.x=wrap(this.x+this.vx*cfg.DT,cfg.W);
+    this.y=wrap(this.y+this.vy*cfg.DT,cfg.H);
+    const friction = this.boostTime > 0
+	  ? Math.pow(cfg.FRICTION, 0.6)
+	  : cfg.FRICTION;
+
+	this.vx *= friction;
+	this.vy *= friction;
+    this.omega*=0.96;
+
+	// lets not reward them just for moving forward. 
+    //const forward=(Math.cos(this.angle)*(this.vx/sp||0)+
+    //               Math.sin(this.angle)*(this.vy/sp||0));
+    //this.score+=Math.max(0,forward)*sp*0.0006;
+
+    this.energy-=cfg.ENERGY_DECAY*cfg.DT;
+    this.energy-=cfg.ENERGY_MOVE_COST*sp*cfg.DT;
+    this.energy-=cfg.ENERGY_TURN_COST*(this.omega*this.omega)*cfg.DT;
+    this.energy=clamp(this.energy,0,cfg.ENERGY_MAX);
+
+    this.boostCD=Math.max(0,this.boostCD-cfg.DT);
+    this.brakeCD=Math.max(0,this.brakeCD-cfg.DT);
+    this.cooldown=Math.max(0,this.cooldown-cfg.DT);
+	this.boostTime = Math.max(0, this.boostTime - cfg.DT);
+	
+	this.timeSinceEat += cfg.DT;
+	const hunger = Math.min(this.timeSinceEat, 10);
+	this.score -= hunger * 0.015 * cfg.DT;
+	
+	if (food) {
+	  const d = len(food.x - this.x, food.y - this.y);
+	  const delta = this.prevFoodDist - d;
+	  this.score += clamp(delta, -1, 1) * 0.035;
+	  this.prevFoodDist = d;
+	}
+  }
+
+  tryEat(){
+  for(const f of foods){
+    if(len(f.x-this.x,f.y-this.y)<cfg.EAT_RADIUS){
+      this.energy = clamp(this.energy + cfg.FOOD_ENERGY, 0, cfg.ENERGY_MAX);
+      this.score += 12 + (1 - this.energy / cfg.ENERGY_MAX) * 8;
+      this.timeSinceEat = 0;
+      this.foodEaten++;
+      this.prevFoodDist = Infinity;
+
+      // MOVE THE FOOD SO IT IS ACTUALLY CONSUMED
+      const a = rand(0, Math.PI * 2);
+      const r = rand(0, cfg.FOOD_RADIUS);
+      f.x = wrap(f.c.x + Math.cos(a) * r, cfg.W);
+      f.y = wrap(f.c.y + Math.sin(a) * r, cfg.H);
+    }
+  }
+}
+
+  canReproduce() {
+  return this.energy > cfg.REPRO_THRESHOLD &&
+         this.foodEaten >= 2 &&
+         this.cooldown <= 0 &&
+         this.children < cfg.MAX_CHILDREN;
+}
+
+  draw(rank,absNorm){
+    ctx.save();
+    ctx.translate(this.x,this.y);
+    ctx.rotate(this.angle);
+    ctx.beginPath();
+    ctx.moveTo(8,0);
+    ctx.lineTo(-6,4);
+    ctx.lineTo(-6,-4);
+    ctx.closePath();
+    ctx.fillStyle=`hsl(${this.hue},70%,50%)`;
+    ctx.fill();
+    if(rank<=3){
+      ctx.lineWidth=rank===1?3:2;
+      ctx.strokeStyle=rank===1?"#ffd700":rank===2?"#ccc":"#cd7f32";
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.fillStyle="#fff";
+    ctx.font="10px system-ui";
+    ctx.textAlign="center";
+    ctx.fillText(`${rank} (${absNorm.toFixed(2)})`,this.x,this.y-10);
+	ctx.fillStyle = "#aaa";
+	ctx.font = "9px system-ui";
+	ctx.textAlign = "center";
+	ctx.fillText(
+	  `#${this.birthId}  G${this.generation}  E${this.energy.toFixed(0)}`,
+	  this.x,
+	  this.y + 14
+	);
+  }
+}
+
+/* =========================
+   WORLD
+========================= */
+let creatures=[];
+function init(){
+  initFood();
+  creatures=Array.from({length:cfg.POP_INIT},()=>new Creature());
+}
+init();
+
+function nearestFood(c){
+  let best=null,bd=1e9;
+  foods.forEach(f=>{
+    const d=(f.x-c.x)**2+(f.y-c.y)**2;
+    if(d<bd){bd=d;best=f;}
+  });
+  return best;
+}
+
+/* =========================
+   LOOP
+========================= */
+function tick(){
+  creatures.forEach(c=>{
+    c.step(nearestFood(c));
+    c.tryEat();
+  });
+
+  const parents = creatures.filter(c => c.canReproduce());
+
+	function pickWeighted(arr) {
+	const base = 0.5; // flat mating chance
+	  const total = arr.reduce((s,c) => s + base + Math.sqrt(Math.max(0.01, c.score)), 0);
+	  let r = Math.random() * total;
+	  for (const c of arr) {
+		r -= base + Math.sqrt(Math.max(0.01, c.score));
+		if (r <= 0) return c;
+	  }
+	  return arr[arr.length - 1];
+	}
+const attempts = Math.floor(parents.length / 2);
+
+for (let i = 0; i < attempts; i++) {
+  const a = pickWeighted(parents);
+  const b = pickWeighted(parents);
+
+  if (!a || !b || a === b) continue;
+
+  const w = Brain.mutate(
+    Brain.crossover(a.genome, b.genome)
+  );
+
+  const child = new Creature(w, [a, b]);
+  child.x = a.x;
+  child.y = a.y;
+
+  a.energy -= cfg.REPRO_COST;
+  b.energy -= cfg.REPRO_COST;
+  a.cooldown = b.cooldown = cfg.REPRO_COOLDOWN;
+
+  a.children++;
+  b.children++;
+
+  creatures.push(child);
+}
+
+
+  creatures=creatures.filter(c=>c.energy>0);
+  if(creatures.length>cfg.POP_MAX){
+    creatures.sort((a,b)=>b.score-a.score);
+    creatures.length=cfg.POP_MAX;
+  }
+  if(creatures.length<cfg.POP_MIN){
+    const best=creatures[0];
+    while(creatures.length<cfg.POP_MIN){
+      creatures.push(new Creature(Brain.mutate(best.genome),[best,best]));
+    }
+  }
+
+  ctx.clearRect(0,0,cfg.W,cfg.H);
+  foods.forEach(f=>{
+    ctx.fillStyle="#6f6";
+    ctx.beginPath();
+    ctx.arc(f.x,f.y,3,0,Math.PI*2);
+    ctx.fill();
+  });
+
+  creatures.sort((a,b)=>b.score-a.score);
+  const max=creatures[0]?.score||1;
+  bestFitnessEver=Math.max(bestFitnessEver,max);
+
+  creatures.forEach((c,i)=>{
+    const absNorm=clamp(c.score/(bestFitnessEver||1),0,1);
+    c.draw(i+1,absNorm);
+  });
+
+  hud.innerHTML=
+    `Population: ${creatures.length}<br>`+
+    `Best (alive): ${max.toFixed(2)}<br>`+
+    `Best ever: ${bestFitnessEver.toFixed(2)}<br>`+
+    `Avg fitness: ${(creatures.reduce((s,c)=>s+c.score,0)/creatures.length).toFixed(2)}<br>`+
+    `Food clusters: ${cfg.FOOD_CLUSTERS}<br>`+
+    `Speed scale: ~0.4x`;
+
+  requestAnimationFrame(tick);
+}
+tick();
+
+})();
+</script>
+</body>
+</html>
